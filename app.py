@@ -213,7 +213,7 @@ def confetti_burst():
 
 
 # ============================
-# Parts (x4 props/motors/ESCs)
+# Parts
 # ============================
 PART_CARDS: List[str] = (
     [f"Propeller {i}" for i in range(1, 5)]
@@ -231,28 +231,24 @@ PART_CARDS: List[str] = (
 
 
 # ============================
-# Zones (tweak xy as needed)
+# Zones
 # ============================
 ZONES: List[Zone] = [
-    # Props (4)
     Zone("z_prop_tl", "Propeller (Top-Left)", (0.16, 0.27)),
     Zone("z_prop_tr", "Propeller (Top-Right)", (0.86, 0.27)),
     Zone("z_prop_bl", "Propeller (Bottom-Left)", (0.19, 0.64)),
     Zone("z_prop_br", "Propeller (Bottom-Right)", (0.83, 0.64)),
 
-    # Motors (4)
     Zone("z_motor_tl", "Motor (Top-Left)", (0.19, 0.36)),
     Zone("z_motor_tr", "Motor (Top-Right)", (0.86, 0.36)),
     Zone("z_motor_bl", "Motor (Bottom-Left)", (0.22, 0.73)),
     Zone("z_motor_br", "Motor (Bottom-Right)", (0.81, 0.73)),
 
-    # ESCs (4)
     Zone("z_esc_tl", "ESC (Top-Left Arm)", (0.31, 0.42)),
     Zone("z_esc_tr", "ESC (Top-Right Arm)", (0.70, 0.42)),
     Zone("z_esc_bl", "ESC (Bottom-Left Arm)", (0.33, 0.69)),
     Zone("z_esc_br", "ESC (Bottom-Right Arm)", (0.69, 0.69)),
 
-    # Core electronics
     Zone("z_receiver", "Control Receiver", (0.43, 0.33)),
     Zone("z_tx", "FPV Transmitter", (0.60, 0.34)),
     Zone("z_antenna", "Antenna", (0.52, 0.16)),
@@ -363,7 +359,7 @@ PART_LESSONS = {
                   ["Signal is lost", "Battery is full", "Props are removed"], 0)
     },
     "FPV Transmitter": {
-        "title":a": "FPV Video Transmitter (VTX)",
+        "title": "FPV Video Transmitter (VTX)",
         "what": "Sends the FPV camera feed to goggles/ground receiver. Higher power can mean more heat.",
         "gotchas": [
             "Never power a VTX without an antenna attached.",
@@ -499,30 +495,22 @@ def get_font():
     return ImageFont.load_default()
 
 def generate_schematic_board(width: int = 1400, height: int = 900) -> Image.Image:
-    """
-    A clean, intentional board canvas (no external image files).
-    """
-    img = Image.new("RGB", (width, height), (8, 12, 10))  # dark green-black
+    img = Image.new("RGB", (width, height), (8, 12, 10))
     d = ImageDraw.Draw(img)
     font = get_font()
 
-    # faint grid
     step = 80
     for x in range(0, width, step):
         d.line((x, 0, x, height), fill=(18, 28, 22))
     for y in range(0, height, step):
         d.line((0, y, width, y), fill=(18, 28, 22))
 
-    # center crosshair
     cx, cy = width // 2, height // 2
     d.line((cx - 50, cy, cx + 50, cy), fill=(0, 255, 136))
     d.line((cx, cy - 50, cx, cy + 50), fill=(0, 255, 136))
 
-    # subtle title
-    title = "DRONE ASSEMBLY BOARD // SCHEMATIC MODE"
-    d.text((30, 20), title, fill=(159, 220, 192), font=font)
+    d.text((30, 20), "DRONE ASSEMBLY BOARD // SCHEMATIC MODE", fill=(159, 220, 192), font=font)
 
-    # faint quad outline (just for vibes)
     arm = min(width, height) * 0.32
     pts = [
         (cx - arm, cy - arm),
@@ -562,14 +550,12 @@ def draw_board(board: Image.Image, placements: Dict[str, str], show_hints: bool,
     d = ImageDraw.Draw(img)
     font = get_font()
 
-    # Hint rings (tactical green)
     if show_hints:
         for z in ZONES:
             x, y = int(z.xy[0] * W), int(z.xy[1] * H)
             r = max(10, int(min(W, H) * 0.016))
             d.ellipse((x - r, y - r, x + r, y + r), outline=(0, 255, 136), width=3)
 
-    # Draw placements
     for zone_key, part in placements.items():
         z = ZONES_MAP[zone_key]
         x, y = int(z.xy[0] * W), int(z.xy[1] * H)
@@ -580,12 +566,10 @@ def draw_board(board: Image.Image, placements: Dict[str, str], show_hints: bool,
         outline = (10, 80, 40) if ok else (120, 20, 20)
         d.ellipse((x - r, y - r, x + r, y + r), fill=fill, outline=outline, width=3)
 
-        # Pulse ring (newly locked zone)
         if pulse_zone and zone_key == pulse_zone and ok:
             pr = r + 10
             d.ellipse((x - pr, y - pr, x + pr, y + pr), outline=(0, 255, 136), width=4)
 
-        # Label
         pad = 4
         tw, th = d.textbbox((0, 0), part, font=font)[2:]
         bx0, by0 = x + r + 6, y - th // 2 - pad
@@ -677,6 +661,7 @@ def init_state():
         st.session_state.pulse_zone = None
     if "pulse_until" not in st.session_state:
         st.session_state.pulse_until = 0.0
+
     ensure_build_log()
     ensure_quiz_state()
     if "containers" not in st.session_state:
@@ -695,10 +680,8 @@ init_state()
 st.title("🧩 Drone Assembly — Tactical HUD (Quiz Points + Streak)")
 st.markdown('<div class="hud">SYSTEM: DRONE-ASSEMBLY // MODE: TRAINING // THEME: DIGITAL-GREEN</div>', unsafe_allow_html=True)
 
-# Image-free board
 board = generate_schematic_board()
 
-# Top stats
 top_l, top_r = st.columns([0.62, 0.38], gap="large")
 
 with top_r:
@@ -728,14 +711,13 @@ with left:
     containers["parts_bin"] = sort_items(
         containers["parts_bin"],
         direction="vertical",
-        key="parts_bin_sort_final2",
+        key="parts_bin_sort",
     )
 
 with right:
     st.subheader("Drop Zones")
     zone_cols = st.columns(3, gap="medium")
 
-    # clear pulse after short duration
     if st.session_state.pulse_until < time.time():
         st.session_state.pulse_zone = None
 
@@ -756,21 +738,17 @@ with right:
                 containers[z.key] = sort_items(
                     containers[z.key],
                     direction="vertical",
-                    key=f"{z.key}_sort_final2",
+                    key=f"{z.key}_sort",
                 )
 
-# Enforce one per zone
 enforce_one_card_per_zone(containers)
 
-# Snapback wrong drops
 snapped = False
 if snapback_on:
     snapped = snapback_wrong(containers)
 
-# Evaluate
 correct_zones, wrong_zones = evaluate(containers)
 
-# Locking + detect NEW locks
 new_locks: List[str] = []
 if lock_on:
     for zkey in correct_zones:
@@ -781,7 +759,6 @@ if lock_on:
 else:
     locked_zones = set()
 
-# Score + SFX based on placement deltas
 prev_correct = st.session_state.last_eval["correct"]
 prev_wrong = st.session_state.last_eval["wrong"]
 
@@ -803,12 +780,10 @@ st.session_state.containers = containers
 
 placements = compute_placements(containers)
 
-# Pulse effects when a lock happens
 if new_locks:
     st.session_state.pulse_zone = new_locks[-1]
     st.session_state.pulse_until = time.time() + 0.8
 
-# Create pending lesson for the newest lock (one per run)
 if new_locks:
     zkey = new_locks[-1]
     part = containers[zkey][0]
@@ -830,7 +805,6 @@ if new_locks:
         st.session_state.pending_lesson = entry
         st.toast(f"🔒 Locked: {lesson['title']} — quiz unlocked (+points)", icon="🔒")
 
-# Board
 with top_l:
     st.subheader("Build Board")
     overlay = draw_board(board, placements, show_hints=show_hints, pulse_zone=st.session_state.get("pulse_zone"))
@@ -838,13 +812,11 @@ with top_l:
     overlay = apply_vignette(overlay, strength=0.28)
     st.image(overlay, use_container_width=True)
 
-# Progress + status
 total_zones = len(ZONES)
 placed_count = len(placements)
 st.progress(placed_count / total_zones)
 st.caption(f"Filled zones: {placed_count} / {total_zones}")
 
-# Streak meter
 st.write("**Knowledge streak meter**")
 st.progress(min(1.0, st.session_state.quiz_streak / 10.0))
 st.caption(f"Every {STREAK_BONUS_EVERY} correct answers in a row: **+{STREAK_BONUS_POINTS} streak bonus**")
@@ -862,7 +834,6 @@ if wrong_zones:
 else:
     st.success("No incorrect placements right now.")
 
-# Win
 win = (placed_count == total_zones) and (not wrong_zones)
 if win:
     if not st.session_state.did_win:
@@ -876,9 +847,6 @@ else:
     st.session_state.did_win = False
 
 
-# ============================
-# Auto-opening lesson dialog
-# ============================
 pending = st.session_state.pending_lesson
 if pending:
     with st.dialog(f"📘 Mini Lesson Quiz: {pending['title']}"):
@@ -889,9 +857,6 @@ if pending:
             st.rerun()
 
 
-# ============================
-# Mini Lessons Library
-# ============================
 st.divider()
 st.subheader("📚 Mini Lessons Library (locked parts)")
 
