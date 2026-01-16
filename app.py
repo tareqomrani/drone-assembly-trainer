@@ -1,7 +1,5 @@
 import base64
 import io
-import math
-import struct
 import time
 import wave
 from dataclasses import dataclass
@@ -9,14 +7,14 @@ from typing import Dict, Tuple, List, Set, Optional
 
 import numpy as np
 import streamlit as st
+import streamlit.components.v1 as components
 from PIL import Image, ImageDraw, ImageFont
 from streamlit_sortables import sort_items
-import streamlit.components.v1 as components
 
 
-# ----------------------------
+# ============================
 # Data model
-# ----------------------------
+# ============================
 @dataclass(frozen=True)
 class Zone:
     key: str
@@ -24,12 +22,9 @@ class Zone:
     xy: Tuple[float, float]   # normalized (0..1)
 
 
-ASSET_PATH = "assets/parts_of_drone.jpg"
-
-
-# ----------------------------
+# ============================
 # Digital-Green Tactical HUD Theme (CSS)
-# ----------------------------
+# ============================
 components.html("""
 <style>
 :root{
@@ -124,9 +119,9 @@ div.stAlert-warning{ background: rgba(255,170,68,.15); border-left:4px solid var
 """, height=0)
 
 
-# ----------------------------
-# Threat-style SFX pack (replaces beep/buzz)
-# ----------------------------
+# ============================
+# Threat-style SFX pack
+# ============================
 def wav_from_samples(x: np.ndarray, sr: int = 22050) -> bytes:
     x = np.clip(x, -1, 1)
     pcm = (x * 32767).astype(np.int16)
@@ -148,7 +143,7 @@ def soft_click(sr=22050, dur=0.045):
     n = int(sr * dur)
     noise = (np.random.randn(n) * 0.25).astype(np.float32)
     e = env(n, sr, attack=0.001, decay=0.03)
-    smooth = np.convolve(noise, np.ones(12)/12, mode="same")
+    smooth = np.convolve(noise, np.ones(12) / 12, mode="same")
     x = (noise - smooth) * e
     return wav_from_samples(x, sr)
 
@@ -156,14 +151,14 @@ def confirm_chime(sr=22050, dur=0.18):
     n = int(sr * dur)
     t = np.arange(n) / sr
     e = env(n, sr, attack=0.004, decay=0.12)
-    x = 0.18*np.sin(2*np.pi*740*t) + 0.12*np.sin(2*np.pi*980*t)
+    x = 0.18 * np.sin(2 * np.pi * 740 * t) + 0.12 * np.sin(2 * np.pi * 980 * t)
     return wav_from_samples((x * e).astype(np.float32), sr)
 
 def error_thud(sr=22050, dur=0.16):
     n = int(sr * dur)
     t = np.arange(n) / sr
     e = env(n, sr, attack=0.002, decay=0.08)
-    x = 0.30*np.sin(2*np.pi*90*t) + 0.08*np.sin(2*np.pi*60*t)
+    x = 0.30 * np.sin(2 * np.pi * 90 * t) + 0.08 * np.sin(2 * np.pi * 60 * t)
     return wav_from_samples((x * e).astype(np.float32), sr)
 
 def win_sweep(sr=22050, dur=0.55):
@@ -172,8 +167,8 @@ def win_sweep(sr=22050, dur=0.55):
     e = env(n, sr, attack=0.01, decay=0.35)
     f0, f1 = 320, 1100
     freq = f0 + (f1 - f0) * (t / t.max())
-    phase = 2*np.pi*np.cumsum(freq)/sr
-    x = 0.22*np.sin(phase) + 0.10*np.sin(2*phase)
+    phase = 2 * np.pi * np.cumsum(freq) / sr
+    x = 0.22 * np.sin(phase) + 0.10 * np.sin(2 * phase)
     return wav_from_samples((x * e).astype(np.float32), sr)
 
 SFX = {
@@ -193,7 +188,6 @@ def play_sound(wav_bytes: bytes):
         """,
         height=0
     )
-
 
 def confetti_burst():
     components.html(
@@ -218,9 +212,9 @@ def confetti_burst():
     )
 
 
-# ----------------------------
+# ============================
 # Parts (x4 props/motors/ESCs)
-# ----------------------------
+# ============================
 PART_CARDS: List[str] = (
     [f"Propeller {i}" for i in range(1, 5)]
     + [f"Motor {i}" for i in range(1, 5)]
@@ -236,9 +230,9 @@ PART_CARDS: List[str] = (
 )
 
 
-# ----------------------------
-# Zones (tweak xy to match your image)
-# ----------------------------
+# ============================
+# Zones (tweak xy as needed)
+# ============================
 ZONES: List[Zone] = [
     # Props (4)
     Zone("z_prop_tl", "Propeller (Top-Left)", (0.16, 0.27)),
@@ -269,9 +263,9 @@ ZONES: List[Zone] = [
 ZONES_MAP: Dict[str, Zone] = {z.key: z for z in ZONES}
 
 
-# ----------------------------
+# ============================
 # Correctness rules
-# ----------------------------
+# ============================
 def is_prop(part: str) -> bool: return part.startswith("Propeller ")
 def is_motor(part: str) -> bool: return part.startswith("Motor ")
 def is_esc(part: str) -> bool: return part.startswith("ESC ")
@@ -304,9 +298,9 @@ for p in PART_CARDS:
         CORRECT_ZONE_FOR[p] = tuple()
 
 
-# ----------------------------
+# ============================
 # Mini lessons + quiz scoring
-# ----------------------------
+# ============================
 PART_LESSONS = {
     "Propeller": {
         "title": "Propeller",
@@ -369,7 +363,7 @@ PART_LESSONS = {
                   ["Signal is lost", "Battery is full", "Props are removed"], 0)
     },
     "FPV Transmitter": {
-        "title": "FPV Video Transmitter (VTX)",
+        "title":a": "FPV Video Transmitter (VTX)",
         "what": "Sends the FPV camera feed to goggles/ground receiver. Higher power can mean more heat.",
         "gotchas": [
             "Never power a VTX without an antenna attached.",
@@ -400,7 +394,6 @@ PART_LESSONS = {
     },
 }
 
-# Bonus rules
 QUIZ_POINTS_CORRECT = 15
 QUIZ_POINTS_WRONG = -5
 STREAK_BONUS_EVERY = 3
@@ -499,14 +492,49 @@ def render_lesson(entry: dict, key_prefix: str):
             st.caption(f"Rewards: +{QUIZ_POINTS_CORRECT} correct / {QUIZ_POINTS_WRONG} wrong")
 
 
-# ----------------------------
-# Board drawing + ISR scanlines
-# ----------------------------
-def load_board(path: str) -> Image.Image:
-    return Image.open(path).convert("RGB")
-
+# ============================
+# Image-free schematic board (no assets required)
+# ============================
 def get_font():
     return ImageFont.load_default()
+
+def generate_schematic_board(width: int = 1400, height: int = 900) -> Image.Image:
+    """
+    A clean, intentional board canvas (no external image files).
+    """
+    img = Image.new("RGB", (width, height), (8, 12, 10))  # dark green-black
+    d = ImageDraw.Draw(img)
+    font = get_font()
+
+    # faint grid
+    step = 80
+    for x in range(0, width, step):
+        d.line((x, 0, x, height), fill=(18, 28, 22))
+    for y in range(0, height, step):
+        d.line((0, y, width, y), fill=(18, 28, 22))
+
+    # center crosshair
+    cx, cy = width // 2, height // 2
+    d.line((cx - 50, cy, cx + 50, cy), fill=(0, 255, 136))
+    d.line((cx, cy - 50, cx, cy + 50), fill=(0, 255, 136))
+
+    # subtle title
+    title = "DRONE ASSEMBLY BOARD // SCHEMATIC MODE"
+    d.text((30, 20), title, fill=(159, 220, 192), font=font)
+
+    # faint quad outline (just for vibes)
+    arm = min(width, height) * 0.32
+    pts = [
+        (cx - arm, cy - arm),
+        (cx + arm, cy - arm),
+        (cx + arm, cy + arm),
+        (cx - arm, cy + arm),
+        (cx - arm, cy - arm),
+    ]
+    d.line(pts, fill=(25, 55, 40), width=6)
+    d.ellipse((cx - 12, cy - 12, cx + 12, cy + 12), outline=(0, 255, 136), width=3)
+
+    return img
 
 def apply_scanlines(img: Image.Image, spacing: int = 3, alpha: int = 24) -> Image.Image:
     img = img.convert("RGBA")
@@ -534,13 +562,14 @@ def draw_board(board: Image.Image, placements: Dict[str, str], show_hints: bool,
     d = ImageDraw.Draw(img)
     font = get_font()
 
-    # Hint rings (tactical green instead of bright blue)
+    # Hint rings (tactical green)
     if show_hints:
         for z in ZONES:
             x, y = int(z.xy[0] * W), int(z.xy[1] * H)
             r = max(10, int(min(W, H) * 0.016))
             d.ellipse((x - r, y - r, x + r, y + r), outline=(0, 255, 136), width=3)
 
+    # Draw placements
     for zone_key, part in placements.items():
         z = ZONES_MAP[zone_key]
         x, y = int(z.xy[0] * W), int(z.xy[1] * H)
@@ -556,6 +585,7 @@ def draw_board(board: Image.Image, placements: Dict[str, str], show_hints: bool,
             pr = r + 10
             d.ellipse((x - pr, y - pr, x + pr, y + pr), outline=(0, 255, 136), width=4)
 
+        # Label
         pad = 4
         tw, th = d.textbbox((0, 0), part, font=font)[2:]
         bx0, by0 = x + r + 6, y - th // 2 - pad
@@ -566,9 +596,9 @@ def draw_board(board: Image.Image, placements: Dict[str, str], show_hints: bool,
     return img
 
 
-# ----------------------------
+# ============================
 # Game logic helpers
-# ----------------------------
+# ============================
 def compute_placements(containers: Dict[str, list]) -> Dict[str, str]:
     placements = {}
     for z in ZONES:
@@ -608,9 +638,9 @@ def snapback_wrong(containers: Dict[str, list]) -> bool:
     return changed
 
 
-# ----------------------------
+# ============================
 # State
-# ----------------------------
+# ============================
 def reset_game():
     st.session_state.start_time = time.time()
     st.session_state.score = 0
@@ -656,20 +686,17 @@ def elapsed_s() -> int:
     return int(time.time() - st.session_state.start_time)
 
 
-# ----------------------------
+# ============================
 # UI
-# ----------------------------
+# ============================
 st.set_page_config(page_title="Drone Assembly (Game)", layout="wide")
 init_state()
 
 st.title("🧩 Drone Assembly — Tactical HUD (Quiz Points + Streak)")
 st.markdown('<div class="hud">SYSTEM: DRONE-ASSEMBLY // MODE: TRAINING // THEME: DIGITAL-GREEN</div>', unsafe_allow_html=True)
 
-try:
-    board = load_board(ASSET_PATH)
-except Exception as e:
-    st.error("Save your image as `assets/parts_of_drone.jpg`.\n\n" + f"Error: {e}")
-    st.stop()
+# Image-free board
+board = generate_schematic_board()
 
 # Top stats
 top_l, top_r = st.columns([0.62, 0.38], gap="large")
@@ -789,7 +816,7 @@ if new_locks:
     lesson = PART_LESSONS.get(lk)
     if lesson:
         entry = {
-            "id": f"{int(time.time()*1000)}_{zkey}_{part}",
+            "id": f"{int(time.time() * 1000)}_{zkey}_{part}",
             "ts": time.time(),
             "part": part,
             "zone": ZONES_MAP[zkey].display_name,
@@ -849,9 +876,9 @@ else:
     st.session_state.did_win = False
 
 
-# ----------------------------
+# ============================
 # Auto-opening lesson dialog
-# ----------------------------
+# ============================
 pending = st.session_state.pending_lesson
 if pending:
     with st.dialog(f"📘 Mini Lesson Quiz: {pending['title']}"):
@@ -862,9 +889,9 @@ if pending:
             st.rerun()
 
 
-# ----------------------------
-# Mini Lessons Library (revisit anytime)
-# ----------------------------
+# ============================
+# Mini Lessons Library
+# ============================
 st.divider()
 st.subheader("📚 Mini Lessons Library (locked parts)")
 
