@@ -1,447 +1,511 @@
-import base64
-import io
+import math
 import time
-import wave
 from dataclasses import dataclass
-from typing import Dict, Tuple, List, Set, Optional
+from pathlib import Path
+from typing import Dict, List, Optional, Tuple
 
-import numpy as np
 import streamlit as st
 import streamlit.components.v1 as components
-from PIL import Image, ImageDraw, ImageFont
-from streamlit_sortables import sort_items
 
 
 # ============================
-# Data model
+# Local component
+# ============================
+_DRONE_CANVAS = components.declare_component(
+    "drone_canvas",
+    path=str(Path(__file__).parent / "drone_canvas"),
+)
+
+# ============================
+# Tactical HUD CSS
+# ============================
+components.html(
+    """
+<style>
+:root{
+  --bg:#070b08; --panel:#0c1310; --border:#1a2a22;
+  --green:#00ff88; --green-dim:#1f3b2c; --green-glow:rgba(0,255,136,.55);
+  --text:#e8fff3; --text-muted:#9fdcc0;
+  --mono: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
+}
+html, body, [data-testid="stApp"] { background: var(--bg); color: var(--text); font-family: var(--mono); }
+h1,h2,h3,h4 { color: var(--green); letter-spacing:.04em; font-family: var(--mono); }
+small,.stCaption { color: var(--text-muted); font-family: var(--mono); }
+section[data-testid="stSidebar"]{
+  background: var(--panel) !important;
+  border-right: 1px solid var(--border);
+}
+div[data-testid="stContainer"], div[data-testid="stExpander"]{
+  background: var(--panel) !important;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+}
+.hud { color: var(--text-muted); letter-spacing: .08em; text-transform: uppercase; font-size: 12px; }
+</style>
+""",
+    height=0,
+)
+
+# ============================
+# Models
 # ============================
 @dataclass(frozen=True)
 class Zone:
     key: str
     display_name: str
-    xy: Tuple[float, float]   # normalized (0..1)
+    xy: Tuple[float, float]  # normalized 0..1
+
+
+@dataclass
+class Part:
+    id: str
+    label: str
+    kind: str
+    x: float
+    y: float
+    locked: bool = False
+    locked_zone: Optional[str] = None
 
 
 # ============================
-# Digital-Green Tactical HUD Theme (CSS)
+# Technical icon SVG sprites (embedded, consistent style)
 # ============================
-components.html("""
-<style>
-:root{
-  --bg:#070b08; --panel:#0c1310; --border:#1a2a22;
-  --green:#00ff88; --green-dim:#1f3b2c; --green-glow:rgba(0,255,136,.55);
-  --blue:#44aaff; --amber:#ffaa44; --red:#ff4466;
-  --text:#e8fff3; --text-muted:#9fdcc0;
-  --mono: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
-}
+def svg_icon(kind: str) -> str:
+    stroke = "#00ff88"
+    muted = "#9fdcc0"
+    fill = "rgba(0,0,0,0)"
 
-/* Global */
-html, body, [data-testid="stApp"] { background: var(--bg); color: var(--text); font-family: var(--mono); }
-h1,h2,h3,h4 { color: var(--green); letter-spacing:.04em; font-family: var(--mono); }
-p,span,li,label { color: var(--text); font-family: var(--mono); }
-small,.stCaption { color: var(--text-muted); font-family: var(--mono); }
+    if kind == "prop":
+        return f"""<svg xmlns="http://www.w3.org/2000/svg" width="80" height="80" viewBox="0 0 80 80">
+          <g stroke="{stroke}" stroke-width="3" fill="{fill}">
+            <circle cx="40" cy="40" r="6"/>
+            <path d="M40 40 C20 25, 16 18, 18 14 C22 10, 30 16, 40 28 Z"/>
+            <path d="M40 40 C60 25, 64 18, 62 14 C58 10, 50 16, 40 28 Z"/>
+            <path d="M40 40 C25 60, 18 64, 14 62 C10 58, 16 50, 28 40 Z"/>
+            <path d="M40 40 C55 60, 62 64, 66 62 C70 58, 64 50, 52 40 Z"/>
+          </g>
+        </svg>"""
+    if kind == "motor":
+        return f"""<svg xmlns="http://www.w3.org/2000/svg" width="80" height="80" viewBox="0 0 80 80">
+          <g stroke="{stroke}" stroke-width="3" fill="{fill}">
+            <rect x="18" y="18" width="44" height="44" rx="10"/>
+            <circle cx="40" cy="40" r="12"/>
+            <path d="M40 28 L40 52"/>
+            <path d="M28 40 L52 40"/>
+            <circle cx="40" cy="40" r="3" fill="{stroke}"/>
+          </g>
+        </svg>"""
+    if kind == "esc":
+        return f"""<svg xmlns="http://www.w3.org/2000/svg" width="80" height="80" viewBox="0 0 80 80">
+          <g stroke="{stroke}" stroke-width="3" fill="{fill}">
+            <rect x="16" y="22" width="48" height="36" rx="6"/>
+            <path d="M22 30 H58"/><path d="M22 38 H58"/><path d="M22 46 H58"/>
+            <path d="M24 58 C24 66, 18 66, 18 70" />
+            <path d="M40 58 C40 66, 34 66, 34 70" />
+            <path d="M56 58 C56 66, 62 66, 62 70" />
+          </g>
+        </svg>"""
+    if kind == "fc":
+        return f"""<svg xmlns="http://www.w3.org/2000/svg" width="80" height="80" viewBox="0 0 80 80">
+          <g stroke="{stroke}" stroke-width="3" fill="{fill}">
+            <rect x="18" y="18" width="44" height="44" rx="8"/>
+            <circle cx="40" cy="40" r="10"/>
+            <path d="M10 28 H18"/><path d="M10 40 H18"/><path d="M10 52 H18"/>
+            <path d="M62 28 H70"/><path d="M62 40 H70"/><path d="M62 52 H70"/>
+          </g>
+        </svg>"""
+    if kind == "pdb":
+        return f"""<svg xmlns="http://www.w3.org/2000/svg" width="80" height="80" viewBox="0 0 80 80">
+          <g stroke="{stroke}" stroke-width="3" fill="{fill}">
+            <rect x="14" y="20" width="52" height="40" rx="10"/>
+            <circle cx="26" cy="40" r="4" fill="{stroke}"/>
+            <circle cx="40" cy="40" r="4" fill="{stroke}"/>
+            <circle cx="54" cy="40" r="4" fill="{stroke}"/>
+            <path d="M40 20 V12" /><path d="M36 12 H44" />
+          </g>
+        </svg>"""
+    if kind == "rx":
+        return f"""<svg xmlns="http://www.w3.org/2000/svg" width="80" height="80" viewBox="0 0 80 80">
+          <g stroke="{stroke}" stroke-width="3" fill="{fill}">
+            <rect x="18" y="26" width="44" height="28" rx="6"/>
+            <path d="M26 54 V70"/><path d="M54 54 V70"/>
+            <path d="M40 26 V18"/><circle cx="40" cy="18" r="4" fill="{stroke}"/>
+          </g>
+        </svg>"""
+    if kind == "vtx":
+        return f"""<svg xmlns="http://www.w3.org/2000/svg" width="80" height="80" viewBox="0 0 80 80">
+          <g stroke="{stroke}" stroke-width="3" fill="{fill}">
+            <rect x="18" y="24" width="44" height="32" rx="7"/>
+            <path d="M26 56 V68"/><path d="M54 56 V68"/>
+            <path d="M62 30 C70 34, 70 46, 62 50" />
+            <path d="M58 33 C64 36, 64 44, 58 47" />
+          </g>
+        </svg>"""
+    if kind == "antenna":
+        return f"""<svg xmlns="http://www.w3.org/2000/svg" width="80" height="80" viewBox="0 0 80 80">
+          <g stroke="{stroke}" stroke-width="3" fill="{fill}">
+            <path d="M40 64 V24" /><circle cx="40" cy="20" r="5" fill="{stroke}"/>
+            <path d="M26 28 C18 36, 18 48, 26 56" />
+            <path d="M54 28 C62 36, 62 48, 54 56" />
+            <path d="M32 34 C28 38, 28 46, 32 50" />
+            <path d="M48 34 C52 38, 52 46, 48 50" />
+          </g>
+        </svg>"""
+    if kind == "camera":
+        return f"""<svg xmlns="http://www.w3.org/2000/svg" width="80" height="80" viewBox="0 0 80 80">
+          <g stroke="{stroke}" stroke-width="3" fill="{fill}">
+            <rect x="16" y="26" width="48" height="30" rx="8"/>
+            <circle cx="40" cy="41" r="10"/><circle cx="40" cy="41" r="3" fill="{stroke}"/>
+            <path d="M24 26 L30 18 H50 L56 26" />
+          </g>
+        </svg>"""
 
-/* Panels */
-section[data-testid="stSidebar"],
-div[data-testid="stContainer"],
-div[data-testid="stExpander"]{
-  background: var(--panel) !important;
-  border: 1px solid var(--border);
-  border-radius: 12px;
-}
-
-/* Buttons */
-button[kind="primary"]{
-  background: linear-gradient(180deg,#00ff88,#00cc6a);
-  color:#002b18; border:none;
-  box-shadow: 0 0 16px var(--green-glow);
-  font-family: var(--mono);
-}
-button{
-  background: var(--panel);
-  color: var(--green);
-  border: 1px solid var(--green-dim);
-  font-family: var(--mono);
-}
-
-/* Progress bars */
-div[role="progressbar"] > div{
-  background: linear-gradient(90deg,#00ff88,#44ffbb);
-  box-shadow: 0 0 10px var(--green-glow);
-}
-
-/* Metrics */
-[data-testid="stMetricValue"]{ color: var(--green); font-weight: 800; font-family: var(--mono); }
-[data-testid="stMetricLabel"]{ color: var(--text-muted); font-family: var(--mono); }
-
-/* Toasts + alerts */
-div[data-testid="stToast"]{
-  background:#0f2018 !important;
-  border-left:4px solid var(--green);
-  color: var(--text);
-  font-family: var(--mono);
-}
-div.stAlert-error{ background: rgba(255,68,102,.12); border-left:4px solid var(--red); }
-div.stAlert-warning{ background: rgba(255,170,68,.15); border-left:4px solid var(--amber); }
-
-/* LOCKED badge */
-.locked-badge{
-  display:inline-block; padding:2px 10px; border-radius:999px;
-  background: var(--green-dim);
-  color: var(--green);
-  border:1px solid var(--green);
-  box-shadow: 0 0 10px var(--green-glow);
-  font-size: 12px;
-  margin-left: 6px;
-}
-
-/* Shake (wrong placement) */
-@keyframes shake {
-  0% { transform: translateX(0); }
-  25% { transform: translateX(-6px); }
-  50% { transform: translateX(6px); }
-  75% { transform: translateX(-6px); }
-  100% { transform: translateX(0); }
-}
-.shake { animation: shake 0.22s ease-in-out 0s 2; }
-
-/* Pulse animation (newly locked) */
-@keyframes greenPulse{
-  0%{ box-shadow:0 0 0 rgba(0,255,136,0); transform: scale(1.0); }
-  35%{ box-shadow:0 0 18px var(--green-glow); transform: scale(1.03); }
-  100%{ box-shadow:0 0 0 rgba(0,255,136,0); transform: scale(1.0); }
-}
-.pulse { animation: greenPulse .55s ease-out 1; }
-
-/* HUD label */
-.hud { color: var(--text-muted); letter-spacing: .08em; text-transform: uppercase; font-size: 12px; }
-</style>
-""", height=0)
-
-
-# ============================
-# Threat-style SFX pack
-# ============================
-def wav_from_samples(x: np.ndarray, sr: int = 22050) -> bytes:
-    x = np.clip(x, -1, 1)
-    pcm = (x * 32767).astype(np.int16)
-    buf = io.BytesIO()
-    with wave.open(buf, "wb") as wf:
-        wf.setnchannels(1)
-        wf.setsampwidth(2)
-        wf.setframerate(sr)
-        wf.writeframes(pcm.tobytes())
-    return buf.getvalue()
-
-def env(n, sr, attack=0.003, decay=0.08):
-    t = np.arange(n) / sr
-    a = np.clip(t / max(attack, 1e-6), 0, 1)
-    d = np.exp(-t / max(decay, 1e-6))
-    return a * d
-
-def soft_click(sr=22050, dur=0.045):
-    n = int(sr * dur)
-    noise = (np.random.randn(n) * 0.25).astype(np.float32)
-    e = env(n, sr, attack=0.001, decay=0.03)
-    smooth = np.convolve(noise, np.ones(12) / 12, mode="same")
-    x = (noise - smooth) * e
-    return wav_from_samples(x, sr)
-
-def confirm_chime(sr=22050, dur=0.18):
-    n = int(sr * dur)
-    t = np.arange(n) / sr
-    e = env(n, sr, attack=0.004, decay=0.12)
-    x = 0.18 * np.sin(2 * np.pi * 740 * t) + 0.12 * np.sin(2 * np.pi * 980 * t)
-    return wav_from_samples((x * e).astype(np.float32), sr)
-
-def error_thud(sr=22050, dur=0.16):
-    n = int(sr * dur)
-    t = np.arange(n) / sr
-    e = env(n, sr, attack=0.002, decay=0.08)
-    x = 0.30 * np.sin(2 * np.pi * 90 * t) + 0.08 * np.sin(2 * np.pi * 60 * t)
-    return wav_from_samples((x * e).astype(np.float32), sr)
-
-def win_sweep(sr=22050, dur=0.55):
-    n = int(sr * dur)
-    t = np.arange(n) / sr
-    e = env(n, sr, attack=0.01, decay=0.35)
-    f0, f1 = 320, 1100
-    freq = f0 + (f1 - f0) * (t / t.max())
-    phase = 2 * np.pi * np.cumsum(freq) / sr
-    x = 0.22 * np.sin(phase) + 0.10 * np.sin(2 * phase)
-    return wav_from_samples((x * e).astype(np.float32), sr)
-
-SFX = {
-    "drag": soft_click(),
-    "correct": confirm_chime(),
-    "wrong": error_thud(),
-    "win": win_sweep(),
-}
-
-def play_sound(wav_bytes: bytes):
-    b64 = base64.b64encode(wav_bytes).decode("utf-8")
-    components.html(
-        f"""
-        <audio autoplay>
-          <source src="data:audio/wav;base64,{b64}" type="audio/wav">
-        </audio>
-        """,
-        height=0
-    )
-
-def confetti_burst():
-    components.html(
-        """
-        <style>
-        .confetti {
-          position: fixed; top: -10px; left: 50%;
-          width: 10px; height: 10px; opacity: 0.9;
-          animation: fall 1.1s linear forwards;
-        }
-        @keyframes fall {
-          0% { transform: translateX(0px) translateY(0px) rotate(0deg); }
-          100% { transform: translateX(var(--dx)) translateY(85vh) rotate(720deg); opacity: 0.0; }
-        }
-        </style>
-        <div class="confetti" style="background:#00ff88; --dx:-140px;"></div>
-        <div class="confetti" style="background:#44aaff; --dx:-70px;"></div>
-        <div class="confetti" style="background:#ffaa44; --dx:45px;"></div>
-        <div class="confetti" style="background:#ff4466; --dx:120px;"></div>
-        """,
-        height=0
-    )
+    return f"""<svg xmlns="http://www.w3.org/2000/svg" width="80" height="80" viewBox="0 0 80 80">
+      <g stroke="{muted}" stroke-width="3" fill="{fill}">
+        <rect x="16" y="16" width="48" height="48" rx="10"/>
+        <text x="40" y="46" text-anchor="middle" fill="{muted}" font-family="monospace" font-size="14">{kind}</text>
+      </g>
+    </svg>"""
 
 
 # ============================
-# Parts
-# ============================
-PART_CARDS: List[str] = (
-    [f"Propeller {i}" for i in range(1, 5)]
-    + [f"Motor {i}" for i in range(1, 5)]
-    + [f"ESC {i}" for i in range(1, 5)]
-    + [
-        "Power Distribution Panel",
-        "Flight Controller",
-        "Control Receiver",
-        "FPV Transmitter",
-        "Antenna",
-        "FPV Camera",
-    ]
-)
-
-
-# ============================
-# Zones
+# Zones (normalized layout)
 # ============================
 ZONES: List[Zone] = [
-    Zone("z_prop_tl", "Propeller (Top-Left)", (0.16, 0.27)),
-    Zone("z_prop_tr", "Propeller (Top-Right)", (0.86, 0.27)),
-    Zone("z_prop_bl", "Propeller (Bottom-Left)", (0.19, 0.64)),
-    Zone("z_prop_br", "Propeller (Bottom-Right)", (0.83, 0.64)),
+    Zone("z_prop_tl", "Prop (TL)", (0.18, 0.22)),
+    Zone("z_prop_tr", "Prop (TR)", (0.82, 0.22)),
+    Zone("z_prop_bl", "Prop (BL)", (0.18, 0.78)),
+    Zone("z_prop_br", "Prop (BR)", (0.82, 0.78)),
 
-    Zone("z_motor_tl", "Motor (Top-Left)", (0.19, 0.36)),
-    Zone("z_motor_tr", "Motor (Top-Right)", (0.86, 0.36)),
-    Zone("z_motor_bl", "Motor (Bottom-Left)", (0.22, 0.73)),
-    Zone("z_motor_br", "Motor (Bottom-Right)", (0.81, 0.73)),
+    Zone("z_motor_tl", "Motor (TL)", (0.26, 0.30)),
+    Zone("z_motor_tr", "Motor (TR)", (0.74, 0.30)),
+    Zone("z_motor_bl", "Motor (BL)", (0.26, 0.70)),
+    Zone("z_motor_br", "Motor (BR)", (0.74, 0.70)),
 
-    Zone("z_esc_tl", "ESC (Top-Left Arm)", (0.31, 0.42)),
-    Zone("z_esc_tr", "ESC (Top-Right Arm)", (0.70, 0.42)),
-    Zone("z_esc_bl", "ESC (Bottom-Left Arm)", (0.33, 0.69)),
-    Zone("z_esc_br", "ESC (Bottom-Right Arm)", (0.69, 0.69)),
+    Zone("z_esc_tl", "ESC (TL arm)", (0.35, 0.36)),
+    Zone("z_esc_tr", "ESC (TR arm)", (0.65, 0.36)),
+    Zone("z_esc_bl", "ESC (BL arm)", (0.35, 0.64)),
+    Zone("z_esc_br", "ESC (BR arm)", (0.65, 0.64)),
 
-    Zone("z_receiver", "Control Receiver", (0.43, 0.33)),
-    Zone("z_tx", "FPV Transmitter", (0.60, 0.34)),
-    Zone("z_antenna", "Antenna", (0.52, 0.16)),
-    Zone("z_pdb", "Power Distribution Panel", (0.53, 0.49)),
-    Zone("z_fc", "Flight Controller", (0.50, 0.60)),
-    Zone("z_camera", "FPV Camera", (0.50, 0.82)),
+    Zone("z_rx", "Receiver", (0.42, 0.34)),
+    Zone("z_vtx", "VTX", (0.58, 0.34)),
+    Zone("z_ant", "Antenna", (0.50, 0.16)),
+    Zone("z_pdb", "PDB", (0.50, 0.50)),
+    Zone("z_fc", "Flight Ctrl", (0.50, 0.62)),
+    Zone("z_cam", "Camera", (0.50, 0.86)),
 ]
-ZONES_MAP: Dict[str, Zone] = {z.key: z for z in ZONES}
+ZMAP = {z.key: z for z in ZONES}
 
+# Snap radius in normalized units (board is 0..1)
+ZONE_RADIUS_NORM = 0.055
 
-# ============================
-# Correctness rules
-# ============================
-def is_prop(part: str) -> bool: return part.startswith("Propeller ")
-def is_motor(part: str) -> bool: return part.startswith("Motor ")
-def is_esc(part: str) -> bool: return part.startswith("ESC ")
-
-PROP_ZONES = ("z_prop_tl", "z_prop_tr", "z_prop_bl", "z_prop_br")
-MOTOR_ZONES = ("z_motor_tl", "z_motor_tr", "z_motor_bl", "z_motor_br")
-ESC_ZONES = ("z_esc_tl", "z_esc_tr", "z_esc_bl", "z_esc_br")
-
-CORRECT_ZONE_FOR: Dict[str, Tuple[str, ...]] = {}
-for p in PART_CARDS:
-    if is_prop(p):
-        CORRECT_ZONE_FOR[p] = PROP_ZONES
-    elif is_motor(p):
-        CORRECT_ZONE_FOR[p] = MOTOR_ZONES
-    elif is_esc(p):
-        CORRECT_ZONE_FOR[p] = ESC_ZONES
-    elif p == "Power Distribution Panel":
-        CORRECT_ZONE_FOR[p] = ("z_pdb",)
-    elif p == "Flight Controller":
-        CORRECT_ZONE_FOR[p] = ("z_fc",)
-    elif p == "Control Receiver":
-        CORRECT_ZONE_FOR[p] = ("z_receiver",)
-    elif p == "FPV Transmitter":
-        CORRECT_ZONE_FOR[p] = ("z_tx",)
-    elif p == "Antenna":
-        CORRECT_ZONE_FOR[p] = ("z_antenna",)
-    elif p == "FPV Camera":
-        CORRECT_ZONE_FOR[p] = ("z_camera",)
-    else:
-        CORRECT_ZONE_FOR[p] = tuple()
-
+# Allowed kinds per zone
+ZONE_KIND_ALLOWED: Dict[str, List[str]] = {
+    "z_prop_tl": ["prop"], "z_prop_tr": ["prop"], "z_prop_bl": ["prop"], "z_prop_br": ["prop"],
+    "z_motor_tl": ["motor"], "z_motor_tr": ["motor"], "z_motor_bl": ["motor"], "z_motor_br": ["motor"],
+    "z_esc_tl": ["esc"], "z_esc_tr": ["esc"], "z_esc_bl": ["esc"], "z_esc_br": ["esc"],
+    "z_rx": ["rx"],
+    "z_vtx": ["vtx"],
+    "z_ant": ["antenna"],
+    "z_pdb": ["pdb"],
+    "z_fc": ["fc"],
+    "z_cam": ["camera"],
+}
 
 # ============================
-# Mini lessons + quiz scoring
+# Lessons + randomized quiz pools (stored per lock event)
 # ============================
-PART_LESSONS = {
-    "Propeller": {
+QUIZ_BANK: Dict[str, Dict] = {
+    "prop": {
         "title": "Propeller",
-        "what": "Generates thrust by accelerating air. Size/pitch affects efficiency, speed, and current draw.",
+        "what": "Generates thrust by accelerating air. Pitch/diameter strongly affect efficiency and current draw.",
         "gotchas": [
-            "CW vs CCW orientation must match motor direction.",
-            "Too much pitch/diameter can overdraw current and overheat motor/ESC."
+            "CW/CCW props must match motor direction.",
+            "Oversized props can overcurrent motor/ESC."
         ],
-        "check": ("If prop pitch increases (all else equal), motor load generally…",
-                  ["Increases", "Decreases", "Stays identical"], 0)
+        "questions": [
+            ("If prop pitch increases (all else equal), motor load generally…",
+             ["Increases", "Decreases", "Stays identical"], 0),
+            ("A larger prop diameter usually…",
+             ["Increases thrust and current draw", "Always reduces current draw", "Has no effect"], 0),
+        ],
     },
-    "Motor": {
+    "motor": {
         "title": "Brushless Motor",
-        "what": "Spins the prop. Kv (~RPM per volt) influences speed vs torque behavior.",
+        "what": "Spins the prop. Kv (~RPM/Volt) influences speed vs torque behavior.",
         "gotchas": [
             "High Kv often suits smaller props (higher RPM, lower torque).",
-            "Overheating usually means too much load or poor cooling."
+            "Heat often indicates overload or poor airflow."
         ],
-        "check": ("Higher Kv generally means…",
-                  ["More RPM per volt", "More torque per amp", "Lower RPM per volt"], 0)
+        "questions": [
+            ("Higher Kv generally means…",
+             ["More RPM per volt", "More torque per amp", "Lower RPM per volt"], 0),
+            ("If motors overheat, a common cause is…",
+             ["Prop load too high", "Too much altitude", "Too much GPS"], 0),
+        ],
     },
-    "ESC": {
+    "esc": {
         "title": "ESC (Electronic Speed Controller)",
-        "what": "Turns battery DC into timed 3-phase power for the motor; controls speed via PWM/commutation.",
+        "what": "Drives the motor using commutation. Must be rated above peak current with margin.",
         "gotchas": [
-            "ESC rating must exceed peak current draw (with margin).",
-            "Signal protocol (PWM/DShot) must match the flight controller."
+            "Underrated ESCs fail from heat/overcurrent.",
+            "Protocol (PWM/DShot) must match FC."
         ],
-        "check": ("An undersized ESC most commonly fails due to…",
-                  ["Overcurrent/overheating", "Too much thrust", "Low battery voltage"], 0)
+        "questions": [
+            ("An undersized ESC most commonly fails due to…",
+             ["Overcurrent/overheating", "Too much thrust", "Low battery voltage"], 0),
+            ("ESC current rating should be…",
+             ["Above peak draw with margin", "Exactly equal to peak draw", "Below peak draw"], 0),
+        ],
     },
-    "Power Distribution Panel": {
-        "title": "Power Distribution Panel (PDB)",
-        "what": "Splits battery power to ESCs and accessories; often includes filtering or a BEC.",
+    "pdb": {
+        "title": "Power Distribution Board (PDB)",
+        "what": "Distributes battery power to ESCs and accessories; sometimes adds filtering/BEC.",
         "gotchas": [
-            "Bad solder joints create voltage drop + heat.",
-            "Filtering reduces video noise and FC interference."
+            "Bad solder joints cause voltage drop + heat.",
+            "Filtering reduces FPV noise and FC interference."
         ],
-        "check": ("A PDB is mainly used to…",
-                  ["Distribute battery power", "Control yaw", "Transmit FPV video"], 0)
+        "questions": [
+            ("A PDB is mainly used to…",
+             ["Distribute battery power", "Control yaw", "Transmit FPV video"], 0),
+            ("A bad power joint often causes…",
+             ["Heat and voltage drop", "More range", "Cleaner video"], 0),
+        ],
     },
-    "Flight Controller": {
+    "fc": {
         "title": "Flight Controller",
-        "what": "The drone’s brain—reads sensors, runs stabilization loops, and commands the ESCs.",
+        "what": "The brain: reads sensors, runs stabilization loops, commands the ESCs.",
         "gotchas": [
             "Wrong orientation/calibration can cause instant flip on arm.",
-            "Vibration isolation improves gyro signal quality."
+            "Vibration isolation improves gyro quality."
         ],
-        "check": ("The FC outputs commands primarily to…",
-                  ["ESCs", "Props directly", "Battery cells"], 0)
+        "questions": [
+            ("The FC outputs commands primarily to…",
+             ["ESCs", "Props directly", "Battery cells"], 0),
+            ("Excess vibration mainly hurts…",
+             ["Gyro signal quality", "Prop color", "Receiver binding"], 0),
+        ],
     },
-    "Control Receiver": {
-        "title": "Control Receiver",
-        "what": "Receives pilot/control-link commands and feeds them to the flight controller.",
+    "rx": {
+        "title": "Receiver",
+        "what": "Receives the pilot/control link and feeds commands to the FC.",
         "gotchas": [
-            "Antenna placement matters—avoid carbon shadowing and noisy wires.",
-            "Configure failsafe behavior to prevent flyaways."
+            "Antenna placement matters (carbon can shadow RF).",
+            "Set failsafe to prevent flyaways."
         ],
-        "check": ("Failsafe defines behavior when…",
-                  ["Signal is lost", "Battery is full", "Props are removed"], 0)
+        "questions": [
+            ("Failsafe defines behavior when…",
+             ["Signal is lost", "Battery is full", "Props are removed"], 0),
+            ("Carbon frames can reduce range by…",
+             ["Blocking/shielding RF", "Increasing thrust", "Charging the battery"], 0),
+        ],
     },
-    "FPV Transmitter": {
+    "vtx": {
         "title": "FPV Video Transmitter (VTX)",
-        "what": "Sends the FPV camera feed to goggles/ground receiver. Higher power can mean more heat.",
+        "what": "Transmits camera feed. Higher power increases heat and interference risk.",
         "gotchas": [
-            "Never power a VTX without an antenna attached.",
-            "Higher power can cause overheating and RF interference."
+            "Never power a VTX without an antenna.",
+            "High output can overheat if airflow is poor."
         ],
-        "check": ("A VTX should not be powered without…",
-                  ["An antenna", "A flight controller", "A motor"], 0)
+        "questions": [
+            ("A VTX should not be powered without…",
+             ["An antenna", "A flight controller", "A motor"], 0),
+            ("Higher VTX power usually…",
+             ["Increases heat", "Always increases battery voltage", "Improves GPS lock"], 0),
+        ],
     },
-    "Antenna": {
+    "antenna": {
         "title": "Antenna",
-        "what": "Radiates/receives RF for video or control. Polarization and placement strongly affect range.",
+        "what": "Radiates/receives RF. Polarization + placement strongly affect link quality.",
         "gotchas": [
-            "Match polarization (RHCP with RHCP) for best performance.",
-            "Avoid shielding by battery/carbon frame."
+            "Match polarization (RHCP with RHCP).",
+            "Avoid shielding by battery/carbon."
         ],
-        "check": ("Mismatched polarization typically…",
-                  ["Reduces signal", "Increases thrust", "Improves range"], 0)
+        "questions": [
+            ("Mismatched polarization typically…",
+             ["Reduces signal", "Increases thrust", "Improves range"], 0),
+            ("Antenna placement should avoid…",
+             ["Carbon/battery shadowing", "Wind", "Sunlight"], 0),
+        ],
     },
-    "FPV Camera": {
+    "camera": {
         "title": "FPV Camera",
-        "what": "Captures the live video feed. Latency + dynamic range matter a lot for flying.",
+        "what": "Captures the live feed. Low latency and good dynamic range improve control.",
         "gotchas": [
-            "Camera tilt affects perceived speed and handling.",
-            "Power noise can cause rolling lines—use filtering if needed."
+            "Tilt affects perceived speed/handling.",
+            "Noise lines often come from power ripple."
         ],
-        "check": ("A higher camera tilt is generally used for…",
-                  ["Faster forward flight", "Hover-only flight", "Lower RPM motors"], 0)
+        "questions": [
+            ("Higher camera tilt is generally used for…",
+             ["Faster forward flight", "Hover-only flight", "Lower RPM motors"], 0),
+            ("Rolling lines in FPV are often caused by…",
+             ["Power noise", "Too much yaw", "Too many satellites"], 0),
+        ],
     },
 }
+
+
+# ============================
+# Scoring
+# ============================
+PLACEMENT_POINTS_CORRECT = 10
+PLACEMENT_POINTS_WRONG = -3
 
 QUIZ_POINTS_CORRECT = 15
 QUIZ_POINTS_WRONG = -5
+
 STREAK_BONUS_EVERY = 3
 STREAK_BONUS_POINTS = 10
 
 
-def lesson_key_for_part(part_name: str) -> str:
-    if part_name.startswith("Propeller"):
-        return "Propeller"
-    if part_name.startswith("Motor"):
-        return "Motor"
-    if part_name.startswith("ESC"):
-        return "ESC"
-    return part_name
+# ============================
+# Utility
+# ============================
+def dist(a: Tuple[float, float], b: Tuple[float, float]) -> float:
+    return math.sqrt((a[0] - b[0]) ** 2 + (a[1] - b[1]) ** 2)
+
+def find_nearest_zone(x: float, y: float) -> Optional[str]:
+    best = None
+    best_d = 1e9
+    for z in ZONES:
+        d = dist((x, y), z.xy)
+        if d < best_d:
+            best_d = d
+            best = z.key
+    if best is not None and best_d <= ZONE_RADIUS_NORM:
+        return best
+    return None
+
+def is_correct(kind: str, zone_key: str) -> bool:
+    return kind in ZONE_KIND_ALLOWED.get(zone_key, [])
+
+def elapsed_s() -> int:
+    return int(time.time() - st.session_state.start_time)
+
+def serialize_parts(parts: List[Part]) -> List[dict]:
+    return [{
+        "id": p.id,
+        "label": p.label,
+        "kind": p.kind,
+        "x": p.x,
+        "y": p.y,
+        "locked": p.locked,
+        "size_px": 74,
+        "svg": svg_icon(p.kind),
+        "disabled": False,
+    } for p in parts]
+
+def serialize_zones() -> List[dict]:
+    return [{"key": z.key, "display_name": z.display_name, "x": z.xy[0], "y": z.xy[1]} for z in ZONES]
+
+def make_event_id(part_id: str, zone_key: str) -> str:
+    return f"{int(time.time()*1000)}_{part_id}_{zone_key}"
+
+def ensure_state():
+    if "parts" not in st.session_state:
+        parts: List[Part] = []
+
+        # staging layout: bottom row for props/motors/escs, upper row for core electronics
+        x0, dx = 0.06, 0.082
+
+        for i in range(4):
+            parts.append(Part(id=f"prop_{i+1}", label=f"Prop {i+1}", kind="prop", x=x0 + dx*i, y=0.92))
+        for i in range(4):
+            parts.append(Part(id=f"motor_{i+1}", label=f"Motor {i+1}", kind="motor", x=x0 + dx*(i+4), y=0.92))
+        for i in range(4):
+            parts.append(Part(id=f"esc_{i+1}", label=f"ESC {i+1}", kind="esc", x=x0 + dx*(i+8), y=0.92))
+
+        core = [
+            ("pdb_1", "PDB", "pdb", 0.08, 0.80),
+            ("fc_1", "FC", "fc", 0.17, 0.80),
+            ("rx_1", "RX", "rx", 0.26, 0.80),
+            ("vtx_1", "VTX", "vtx", 0.35, 0.80),
+            ("ant_1", "ANT", "antenna", 0.44, 0.80),
+            ("cam_1", "CAM", "camera", 0.53, 0.80),
+        ]
+        for pid, label, kind, x, y in core:
+            parts.append(Part(id=pid, label=label, kind=kind, x=x, y=y))
+
+        st.session_state.parts = parts
+
+    st.session_state.setdefault("start_time", time.time())
+    st.session_state.setdefault("score", 0)
+    st.session_state.setdefault("last_msg", "Ready.")
+    st.session_state.setdefault("lock_on", True)
+    st.session_state.setdefault("show_hints", True)
+    st.session_state.setdefault("show_zone_labels", False)
+    st.session_state.setdefault("sound_on", True)
+
+    # placement stats
+    st.session_state.setdefault("wrong_drops", 0)
+    st.session_state.setdefault("correct_snaps", 0)
+
+    # quiz stats
+    st.session_state.setdefault("quiz_streak", 0)
+    st.session_state.setdefault("quiz_best_streak", 0)
+    st.session_state.setdefault("quiz_points_total", 0)
+    st.session_state.setdefault("quiz_correct", 0)
+    st.session_state.setdefault("quiz_wrong", 0)
+    st.session_state.setdefault("quiz_scored", {})  # event_id -> True
+
+    # lessons
+    st.session_state.setdefault("build_log", [])      # list[dict]
+    st.session_state.setdefault("pending_quiz", None) # dict or None
+
+    # for JS animations/sfx
+    st.session_state.setdefault("server_event", None) # dict or None
 
 
-def ensure_build_log():
-    if "build_log" not in st.session_state:
-        st.session_state.build_log = []
+def reset_all():
+    # Reset parts to staging
+    parts: List[Part] = st.session_state.parts
+    x0, dx = 0.06, 0.082
+    idx = 0
+    core_positions = {
+        "pdb": (0.08, 0.80), "fc": (0.17, 0.80), "rx": (0.26, 0.80),
+        "vtx": (0.35, 0.80), "antenna": (0.44, 0.80), "camera": (0.53, 0.80),
+    }
+
+    for p in parts:
+        p.locked = False
+        p.locked_zone = None
+
+        if p.kind in ("prop", "motor", "esc"):
+            p.x = x0 + dx * idx
+            p.y = 0.92
+            idx += 1
+        else:
+            p.x, p.y = core_positions.get(p.kind, (0.08, 0.80))
+
+    st.session_state.start_time = time.time()
+    st.session_state.score = 0
+    st.session_state.last_msg = "Reset."
+    st.session_state.wrong_drops = 0
+    st.session_state.correct_snaps = 0
+
+    st.session_state.quiz_streak = 0
+    st.session_state.quiz_best_streak = 0
+    st.session_state.quiz_points_total = 0
+    st.session_state.quiz_correct = 0
+    st.session_state.quiz_wrong = 0
+    st.session_state.quiz_scored = {}
+
+    st.session_state.build_log = []
+    st.session_state.pending_quiz = None
+    st.session_state.server_event = None
 
 
-def ensure_quiz_state():
-    if "quiz_scored" not in st.session_state:
-        st.session_state.quiz_scored = {}
-    if "quiz_streak" not in st.session_state:
-        st.session_state.quiz_streak = 0
-    if "quiz_best_streak" not in st.session_state:
-        st.session_state.quiz_best_streak = 0
-    if "quiz_points_total" not in st.session_state:
-        st.session_state.quiz_points_total = 0
-
-
-def lesson_id(entry: dict) -> str:
-    return entry.get("id", f"{entry.get('ts','')}_{entry.get('part','')}_{entry.get('zone','')}")
-
-
-def add_build_log(entry: dict):
-    ensure_build_log()
-    st.session_state.build_log.append(entry)
-
-
-def apply_quiz_result(entry: dict, is_correct: bool):
-    ensure_quiz_state()
-    lid = lesson_id(entry)
-    if st.session_state.quiz_scored.get(lid):
+def apply_quiz_result(entry: dict, is_correct_ans: bool):
+    eid = entry["id"]
+    if st.session_state.quiz_scored.get(eid):
         return
+    st.session_state.quiz_scored[eid] = True
 
-    st.session_state.quiz_scored[lid] = True
-
-    if is_correct:
+    if is_correct_ans:
         st.session_state.score += QUIZ_POINTS_CORRECT
         st.session_state.quiz_points_total += QUIZ_POINTS_CORRECT
+        st.session_state.quiz_correct += 1
+
         st.session_state.quiz_streak += 1
         st.session_state.quiz_best_streak = max(st.session_state.quiz_best_streak, st.session_state.quiz_streak)
 
@@ -452,417 +516,265 @@ def apply_quiz_result(entry: dict, is_correct: bool):
     else:
         st.session_state.score += QUIZ_POINTS_WRONG
         st.session_state.quiz_points_total += QUIZ_POINTS_WRONG
+        st.session_state.quiz_wrong += 1
         st.session_state.quiz_streak = 0
 
 
-def render_lesson(entry: dict, key_prefix: str):
-    ensure_quiz_state()
-    lid = lesson_id(entry)
-    scored = bool(st.session_state.quiz_scored.get(lid, False))
+def render_quiz(entry: dict):
+    lesson = entry["lesson"]
+    q, opts, correct_i = entry["question"]
 
-    st.markdown(f"### {entry['title']}")
-    st.caption(f"Locked: **{entry['part']}** → **{entry['zone']}**")
-    st.write(entry["what"])
+    st.markdown(f"### {lesson['title']}")
+    st.caption(f"Locked: **{entry['part_label']}** → **{entry['zone_name']}**")
+    st.write(lesson["what"])
     st.write("**Gotchas:**")
-    for g in entry["gotchas"]:
+    for g in lesson["gotchas"]:
         st.write(f"• {g}")
 
-    q, opts, correct_i = entry["check"]
-    choice = st.radio(q, opts, key=f"{key_prefix}_radio", horizontal=False)
+    choice = st.radio(q, opts, key=f"quiz_choice_{entry['id']}")
 
-    cols = st.columns([0.45, 0.55])
-    with cols[0]:
-        if st.button("Check answer", key=f"{key_prefix}_check", disabled=scored):
-            is_correct = (opts.index(choice) == correct_i)
-            apply_quiz_result(entry, is_correct)
-            if is_correct:
-                st.success(f"✅ Correct! +{QUIZ_POINTS_CORRECT}")
-            else:
-                st.error(f"❌ Not quite. Correct: **{opts[correct_i]}** ({QUIZ_POINTS_WRONG})")
-            st.rerun()
-
-    with cols[1]:
-        if scored:
-            st.info("Quiz already scored for this lesson ✅ (no farming).")
+    scored = bool(st.session_state.quiz_scored.get(entry["id"], False))
+    if st.button("Check answer", key=f"quiz_check_{entry['id']}", disabled=scored):
+        is_correct_ans = (opts.index(choice) == correct_i)
+        apply_quiz_result(entry, is_correct_ans)
+        if is_correct_ans:
+            st.success(f"✅ Correct! +{QUIZ_POINTS_CORRECT}")
         else:
-            st.caption(f"Rewards: +{QUIZ_POINTS_CORRECT} correct / {QUIZ_POINTS_WRONG} wrong")
+            st.error(f"❌ Not quite. Correct: **{opts[correct_i]}** ({QUIZ_POINTS_WRONG})")
+        st.rerun()
+
+    if scored:
+        st.info("Quiz already scored for this lesson ✅ (no farming).")
+    else:
+        st.caption(f"Rewards: +{QUIZ_POINTS_CORRECT} correct / {QUIZ_POINTS_WRONG} wrong")
 
 
-# ============================
-# Image-free schematic board (no assets required)
-# ============================
-def get_font():
-    return ImageFont.load_default()
+def compute_grade() -> Tuple[str, Dict[str, float]]:
+    """
+    Grade uses time, wrong drops, quiz accuracy, and best streak.
+    Produces a 0..100 score then maps to letter.
+    """
+    t = max(1, elapsed_s())
+    wrong = st.session_state.wrong_drops
+    qc = st.session_state.quiz_correct
+    qw = st.session_state.quiz_wrong
+    total_q = qc + qw
+    acc = (qc / total_q) if total_q else 0.0
+    best_streak = st.session_state.quiz_best_streak
 
-def generate_schematic_board(width: int = 1400, height: int = 900) -> Image.Image:
-    img = Image.new("RGB", (width, height), (8, 12, 10))
-    d = ImageDraw.Draw(img)
-    font = get_font()
+    # Time score: 0..35 points (fast is better)
+    # ~2 minutes => near max, ~8 minutes => low
+    time_score = max(0.0, 35.0 * (1.0 - min(1.0, (t - 120) / 360)))
 
-    step = 80
-    for x in range(0, width, step):
-        d.line((x, 0, x, height), fill=(18, 28, 22))
-    for y in range(0, height, step):
-        d.line((0, y, width, y), fill=(18, 28, 22))
+    # Accuracy score: 0..35
+    acc_score = 35.0 * acc
 
-    cx, cy = width // 2, height // 2
-    d.line((cx - 50, cy, cx + 50, cy), fill=(0, 255, 136))
-    d.line((cx, cy - 50, cx, cy + 50), fill=(0, 255, 136))
+    # Streak score: 0..20 (cap at 10)
+    streak_score = 20.0 * min(1.0, best_streak / 10.0)
 
-    d.text((30, 20), "DRONE ASSEMBLY BOARD // SCHEMATIC MODE", fill=(159, 220, 192), font=font)
+    # Penalty: wrong drops 0..20
+    penalty = min(20.0, wrong * 2.0)
 
-    arm = min(width, height) * 0.32
-    pts = [
-        (cx - arm, cy - arm),
-        (cx + arm, cy - arm),
-        (cx + arm, cy + arm),
-        (cx - arm, cy + arm),
-        (cx - arm, cy - arm),
-    ]
-    d.line(pts, fill=(25, 55, 40), width=6)
-    d.ellipse((cx - 12, cy - 12, cx + 12, cy + 12), outline=(0, 255, 136), width=3)
+    raw = time_score + acc_score + streak_score - penalty
+    score100 = max(0.0, min(100.0, raw))
 
-    return img
+    if score100 >= 95: grade = "A+"
+    elif score100 >= 90: grade = "A"
+    elif score100 >= 80: grade = "B"
+    elif score100 >= 70: grade = "C"
+    elif score100 >= 60: grade = "D"
+    else: grade = "F"
 
-def apply_scanlines(img: Image.Image, spacing: int = 3, alpha: int = 24) -> Image.Image:
-    img = img.convert("RGBA")
-    overlay = Image.new("RGBA", img.size, (0, 0, 0, 0))
-    d = ImageDraw.Draw(overlay)
-    W, H = img.size
-    for y in range(0, H, spacing):
-        d.line((0, y, W, y), fill=(0, 0, 0, alpha), width=1)
-    return Image.alpha_composite(img, overlay).convert("RGB")
-
-def apply_vignette(img: Image.Image, strength: float = 0.28) -> Image.Image:
-    img = img.convert("RGBA")
-    W, H = img.size
-    overlay = Image.new("RGBA", (W, H), (0, 0, 0, 0))
-    d = ImageDraw.Draw(overlay)
-    steps = 18
-    for i in range(steps):
-        a = int(255 * strength * (i / steps) ** 2)
-        d.rectangle((i, i, W - i, H - i), outline=(0, 0, 0, a), width=2)
-    return Image.alpha_composite(img, overlay).convert("RGB")
-
-def draw_board(board: Image.Image, placements: Dict[str, str], show_hints: bool, pulse_zone: Optional[str] = None) -> Image.Image:
-    img = board.copy()
-    W, H = img.size
-    d = ImageDraw.Draw(img)
-    font = get_font()
-
-    if show_hints:
-        for z in ZONES:
-            x, y = int(z.xy[0] * W), int(z.xy[1] * H)
-            r = max(10, int(min(W, H) * 0.016))
-            d.ellipse((x - r, y - r, x + r, y + r), outline=(0, 255, 136), width=3)
-
-    for zone_key, part in placements.items():
-        z = ZONES_MAP[zone_key]
-        x, y = int(z.xy[0] * W), int(z.xy[1] * H)
-        r = max(12, int(min(W, H) * 0.018))
-
-        ok = zone_key in CORRECT_ZONE_FOR.get(part, tuple())
-        fill = (40, 180, 90) if ok else (220, 70, 70)
-        outline = (10, 80, 40) if ok else (120, 20, 20)
-        d.ellipse((x - r, y - r, x + r, y + r), fill=fill, outline=outline, width=3)
-
-        if pulse_zone and zone_key == pulse_zone and ok:
-            pr = r + 10
-            d.ellipse((x - pr, y - pr, x + pr, y + pr), outline=(0, 255, 136), width=4)
-
-        pad = 4
-        tw, th = d.textbbox((0, 0), part, font=font)[2:]
-        bx0, by0 = x + r + 6, y - th // 2 - pad
-        bx1, by1 = bx0 + tw + 2 * pad, by0 + th + 2 * pad
-        d.rounded_rectangle((bx0, by0, bx1, by1), radius=8, fill=(0, 0, 0))
-        d.text((bx0 + pad, by0 + pad), part, fill=(255, 255, 255), font=font)
-
-    return img
+    return grade, {
+        "score100": score100,
+        "time_score": time_score,
+        "acc_score": acc_score,
+        "streak_score": streak_score,
+        "penalty": penalty,
+        "accuracy": acc,
+    }
 
 
-# ============================
-# Game logic helpers
-# ============================
-def compute_placements(containers: Dict[str, list]) -> Dict[str, str]:
-    placements = {}
-    for z in ZONES:
-        items = containers.get(z.key, [])
-        if items:
-            placements[z.key] = items[0]
-    return placements
+def apply_drag_event(ev: dict):
+    """
+    Process drag-end from JS:
+    - update pos
+    - if near zone -> snap to center (server authoritative)
+    - if correct -> award points and maybe lock
+    - create quiz event on lock (randomized question)
+    - set server_event for JS (snap animation + pulse + sound)
+    """
+    st.session_state.server_event = None
 
-def evaluate(containers: Dict[str, list]) -> Tuple[Set[str], Set[str]]:
-    placements = compute_placements(containers)
-    correct_z, wrong_z = set(), set()
-    for zone_key, part in placements.items():
-        allowed = CORRECT_ZONE_FOR.get(part, tuple())
-        if zone_key in allowed:
-            correct_z.add(zone_key)
+    if not ev or ev.get("type") != "drag":
+        return
+
+    pid = ev["id"]
+    x = float(ev["x"])
+    y = float(ev["y"])
+
+    parts: List[Part] = st.session_state.parts
+    p = next((p for p in parts if p.id == pid), None)
+    if p is None or p.locked:
+        return
+
+    # raw move
+    p.x, p.y = x, y
+
+    zkey = find_nearest_zone(x, y)
+    if not zkey:
+        st.session_state.last_msg = f"Moved: {p.label}"
+        return
+
+    # zone occupied by a locked part?
+    occupied = any((q.locked and q.locked_zone == zkey) for q in parts)
+    if occupied:
+        st.session_state.last_msg = f"Zone occupied: {ZMAP[zkey].display_name}"
+        st.session_state.server_event = {"type": "wrong"}
+        st.session_state.wrong_drops += 1
+        return
+
+    # authoritative snap to center
+    zx, zy = ZMAP[zkey].xy
+    p.x, p.y = zx, zy
+    st.session_state.server_event = {"type": "snap", "part_id": p.id, "x": zx, "y": zy}
+
+    if is_correct(p.kind, zkey):
+        st.session_state.score += PLACEMENT_POINTS_CORRECT
+        st.session_state.correct_snaps += 1
+        st.session_state.last_msg = f"✅ Snapped: {p.label} → {ZMAP[zkey].display_name} (+{PLACEMENT_POINTS_CORRECT})"
+
+        # lock if enabled
+        if st.session_state.lock_on:
+            p.locked = True
+            p.locked_zone = zkey
+            st.session_state.score += 15  # lock bonus
+
+            lesson = QUIZ_BANK.get(p.kind)
+            if lesson:
+                # Pick a question at lock-time and store it in the entry (prevents rerun changing question)
+                q = lesson["questions"][int(time.time() * 1000) % len(lesson["questions"])]
+
+                entry = {
+                    "id": make_event_id(p.id, zkey),
+                    "ts": time.time(),
+                    "part_id": p.id,
+                    "part_label": p.label,
+                    "kind": p.kind,
+                    "zone_key": zkey,
+                    "zone_name": ZMAP[zkey].display_name,
+                    "lesson": lesson,
+                    "question": q,
+                }
+                st.session_state.build_log.append(entry)
+                st.session_state.pending_quiz = entry
+
+            st.session_state.server_event = {"type": "lock", "part_id": p.id, "zone_key": zkey}
+            st.toast(f"🔒 Locked: {QUIZ_BANK.get(p.kind, {}).get('title', p.label)} — quiz unlocked", icon="🔒")
         else:
-            wrong_z.add(zone_key)
-    return correct_z, wrong_z
+            st.session_state.server_event = {"type": "correct", "zone_key": zkey}
+    else:
+        st.session_state.score += PLACEMENT_POINTS_WRONG
+        st.session_state.wrong_drops += 1
+        st.session_state.last_msg = f"❌ Wrong zone: {p.label} near {ZMAP[zkey].display_name} ({PLACEMENT_POINTS_WRONG})"
+        st.session_state.server_event = {"type": "wrong", "zone_key": zkey}
 
-def enforce_one_card_per_zone(containers: Dict[str, list]):
-    for z in ZONES:
-        items = containers.get(z.key, [])
-        if len(items) > 1:
-            keep = [items[-1]]
-            push_back = items[:-1]
-            containers["parts_bin"].extend(push_back)
-            containers[z.key] = keep
 
-def snapback_wrong(containers: Dict[str, list]) -> bool:
-    placements = compute_placements(containers)
-    changed = False
-    for zone_key, part in list(placements.items()):
-        if zone_key not in CORRECT_ZONE_FOR.get(part, tuple()):
-            containers[zone_key] = []
-            containers["parts_bin"].append(part)
-            changed = True
-    return changed
+def is_win(parts: List[Part]) -> bool:
+    return all(p.locked for p in parts)
 
 
 # ============================
-# State
+# App UI
 # ============================
-def reset_game():
-    st.session_state.start_time = time.time()
-    st.session_state.score = 0
-    st.session_state.last_eval = {"correct": set(), "wrong": set()}
-    st.session_state.locked_zones = set()
-    st.session_state.did_win = False
-    st.session_state.pending_lesson = None
-    st.session_state.build_log = []
-    st.session_state.quiz_scored = {}
-    st.session_state.quiz_streak = 0
-    st.session_state.quiz_best_streak = 0
-    st.session_state.quiz_points_total = 0
-    st.session_state.pulse_zone = None
-    st.session_state.pulse_until = 0.0
+st.set_page_config(page_title="Drone Assembly Trainer", layout="wide")
+ensure_state()
 
-    st.session_state.containers = {"parts_bin": PART_CARDS.copy()}
-    for z in ZONES:
-        st.session_state.containers[z.key] = []
-
-def init_state():
-    if "start_time" not in st.session_state:
-        st.session_state.start_time = time.time()
-    if "score" not in st.session_state:
-        st.session_state.score = 0
-    if "last_eval" not in st.session_state:
-        st.session_state.last_eval = {"correct": set(), "wrong": set()}
-    if "locked_zones" not in st.session_state:
-        st.session_state.locked_zones = set()
-    if "did_win" not in st.session_state:
-        st.session_state.did_win = False
-    if "pending_lesson" not in st.session_state:
-        st.session_state.pending_lesson = None
-    if "pulse_zone" not in st.session_state:
-        st.session_state.pulse_zone = None
-    if "pulse_until" not in st.session_state:
-        st.session_state.pulse_until = 0.0
-
-    ensure_build_log()
-    ensure_quiz_state()
-    if "containers" not in st.session_state:
-        reset_game()
-
-def elapsed_s() -> int:
-    return int(time.time() - st.session_state.start_time)
-
-
-# ============================
-# UI
-# ============================
-st.set_page_config(page_title="Drone Assembly (Game)", layout="wide")
-init_state()
-
-st.title("🧩 Drone Assembly — Tactical HUD (Quiz Points + Streak)")
+st.title("🧩 Drone Assembly Trainer — Drag Anywhere (All Features)")
 st.markdown('<div class="hud">SYSTEM: DRONE-ASSEMBLY // MODE: TRAINING // THEME: DIGITAL-GREEN</div>', unsafe_allow_html=True)
+st.caption("Drag parts anywhere. Drop near a zone to snap (animated). Correct locks unlock micro-lessons + randomized quizzes.")
 
-board = generate_schematic_board()
+with st.sidebar:
+    st.subheader("Controls")
+    st.session_state.show_hints = st.toggle("Show hint rings", value=st.session_state.show_hints)
+    st.session_state.show_zone_labels = st.toggle("Show zone labels", value=st.session_state.show_zone_labels)
+    st.session_state.lock_on = st.toggle("Lock correct snaps", value=st.session_state.lock_on)
+    st.session_state.sound_on = st.toggle("Sound effects", value=st.session_state.sound_on)
 
-top_l, top_r = st.columns([0.62, 0.38], gap="large")
+    if st.button("Reset"):
+        reset_all()
+        st.rerun()
 
-with top_r:
+# HUD metrics
+hudL, hudR = st.columns([0.70, 0.30], gap="large")
+with hudR:
+    grade, breakdown = compute_grade()
+
     st.metric("Score", st.session_state.score)
     st.metric("Time (s)", elapsed_s())
+    st.metric("Grade", grade)
+    st.metric("Wrong Drops", st.session_state.wrong_drops)
     st.metric("Quiz Streak", st.session_state.quiz_streak)
     st.metric("Best Streak", st.session_state.quiz_best_streak)
     st.metric("Quiz Points", st.session_state.quiz_points_total)
 
-    show_hints = st.toggle("Show hint rings", value=True)
-    sound_on = st.toggle("Sound effects", value=True)
-    snapback_on = st.toggle("Auto snap-back wrong drops", value=True)
-    lock_on = st.toggle("Lock correct placements", value=True)
-    if st.button("🔄 Reset"):
-        reset_game()
-        st.rerun()
+    st.info(st.session_state.last_msg)
 
-containers = st.session_state.containers
-locked_zones = set(st.session_state.locked_zones)
+    st.write("**Streak meter**")
+    st.progress(min(1.0, st.session_state.quiz_streak / 10.0))
+    st.caption(f"Every {STREAK_BONUS_EVERY} correct answers: **+{STREAK_BONUS_POINTS} bonus**")
 
-st.caption("Drag cards from **Parts Bin** into **Drop Zones**. Correct locks unlock a mini-lesson quiz (with points).")
-
-left, right = st.columns([0.33, 0.67], gap="large")
-
-with left:
-    st.subheader("Parts Bin")
-    containers["parts_bin"] = sort_items(
-        containers["parts_bin"],
-        direction="vertical",
-        key="parts_bin_sort",
+    st.write("**Mission grade breakdown**")
+    st.caption(
+        f"Score100: {breakdown['score100']:.1f} | "
+        f"Time: {breakdown['time_score']:.1f} | "
+        f"Accuracy: {breakdown['acc_score']:.1f} | "
+        f"Streak: {breakdown['streak_score']:.1f} | "
+        f"Penalty: -{breakdown['penalty']:.1f}"
     )
 
-with right:
-    st.subheader("Drop Zones")
-    zone_cols = st.columns(3, gap="medium")
+# Canvas (responsive sizing happens inside JS via container width)
+ev = _DRONE_CANVAS(
+    key="drone_canvas",
+    parts=serialize_parts(st.session_state.parts),
+    zones=serialize_zones(),
+    show_hints=st.session_state.show_hints,
+    show_zone_labels=st.session_state.show_zone_labels,
+    zone_radius_norm=ZONE_RADIUS_NORM,
+    board_aspect=1100 / 680,
+    hud_line="DRONE ASSEMBLY // DRAG ANYWHERE // DROP NEAR ZONES TO SNAP",
+    sound_on=st.session_state.sound_on,
+    server_event=st.session_state.server_event,
+)
 
-    if st.session_state.pulse_until < time.time():
-        st.session_state.pulse_zone = None
+apply_drag_event(ev)
 
-    for i, z in enumerate(ZONES):
-        with zone_cols[i % 3]:
-            locked = (z.key in locked_zones) and lock_on
-            is_pulse = (st.session_state.get("pulse_zone") == z.key)
-            badge = f'<span class="locked-badge {"pulse" if is_pulse else ""}">LOCKED</span>' if locked else ""
-            st.markdown(f"**{z.display_name}** {badge}", unsafe_allow_html=True)
+# Win state
+parts: List[Part] = st.session_state.parts
+if is_win(parts):
+    st.success("✅ Perfect build! All parts locked.")
+    st.balloons()
+    # signal win sfx
+    st.session_state.server_event = {"type": "win"}
 
-            if locked:
-                items = containers.get(z.key, [])
-                if items:
-                    st.info(items[0])
-                else:
-                    st.warning("(locked but empty)")
-            else:
-                containers[z.key] = sort_items(
-                    containers[z.key],
-                    direction="vertical",
-                    key=f"{z.key}_sort",
-                )
-
-enforce_one_card_per_zone(containers)
-
-snapped = False
-if snapback_on:
-    snapped = snapback_wrong(containers)
-
-correct_zones, wrong_zones = evaluate(containers)
-
-new_locks: List[str] = []
-if lock_on:
-    for zkey in correct_zones:
-        if containers.get(zkey):
-            if zkey not in locked_zones:
-                new_locks.append(zkey)
-            locked_zones.add(zkey)
-else:
-    locked_zones = set()
-
-prev_correct = st.session_state.last_eval["correct"]
-prev_wrong = st.session_state.last_eval["wrong"]
-
-newly_correct = correct_zones - prev_correct
-newly_wrong = wrong_zones - prev_wrong
-
-st.session_state.score += 10 * len(newly_correct)
-st.session_state.score -= 3 * len(newly_wrong)
-
-if sound_on:
-    if snapped or newly_wrong:
-        play_sound(SFX["wrong"])
-    elif newly_correct:
-        play_sound(SFX["correct"])
-
-st.session_state.last_eval = {"correct": set(correct_zones), "wrong": set(wrong_zones)}
-st.session_state.locked_zones = set(locked_zones)
-st.session_state.containers = containers
-
-placements = compute_placements(containers)
-
-if new_locks:
-    st.session_state.pulse_zone = new_locks[-1]
-    st.session_state.pulse_until = time.time() + 0.8
-
-if new_locks:
-    zkey = new_locks[-1]
-    part = containers[zkey][0]
-    lk = lesson_key_for_part(part)
-    lesson = PART_LESSONS.get(lk)
-    if lesson:
-        entry = {
-            "id": f"{int(time.time() * 1000)}_{zkey}_{part}",
-            "ts": time.time(),
-            "part": part,
-            "zone": ZONES_MAP[zkey].display_name,
-            "lesson_key": lk,
-            "title": lesson["title"],
-            "what": lesson["what"],
-            "gotchas": lesson["gotchas"],
-            "check": lesson["check"],
-        }
-        add_build_log(entry)
-        st.session_state.pending_lesson = entry
-        st.toast(f"🔒 Locked: {lesson['title']} — quiz unlocked (+points)", icon="🔒")
-
-with top_l:
-    st.subheader("Build Board")
-    overlay = draw_board(board, placements, show_hints=show_hints, pulse_zone=st.session_state.get("pulse_zone"))
-    overlay = apply_scanlines(overlay, spacing=3, alpha=24)
-    overlay = apply_vignette(overlay, strength=0.28)
-    st.image(overlay, use_container_width=True)
-
-total_zones = len(ZONES)
-placed_count = len(placements)
-st.progress(placed_count / total_zones)
-st.caption(f"Filled zones: {placed_count} / {total_zones}")
-
-st.write("**Knowledge streak meter**")
-st.progress(min(1.0, st.session_state.quiz_streak / 10.0))
-st.caption(f"Every {STREAK_BONUS_EVERY} correct answers in a row: **+{STREAK_BONUS_POINTS} streak bonus**")
-
-if snapped:
-    st.toast("↩️ Wrong drop snapped back to Parts Bin.", icon="↩️")
-
-if wrong_zones:
-    st.markdown('<div class="shake">', unsafe_allow_html=True)
-    st.error(
-        "Wrong placements detected in:\n\n"
-        + "\n".join([f"- {ZONES_MAP[z].display_name}" for z in sorted(wrong_zones)])
-    )
-    st.markdown("</div>", unsafe_allow_html=True)
-else:
-    st.success("No incorrect placements right now.")
-
-win = (placed_count == total_zones) and (not wrong_zones)
-if win:
-    if not st.session_state.did_win:
-        st.session_state.did_win = True
-        if sound_on:
-            play_sound(SFX["win"])
-        confetti_burst()
-        st.balloons()
-    st.success("✅ Perfect build! Drone assembled correctly.")
-else:
-    st.session_state.did_win = False
-
-
-pending = st.session_state.pending_lesson
+# Auto-open quiz dialog
+pending = st.session_state.pending_quiz
 if pending:
-    with st.dialog(f"📘 Mini Lesson Quiz: {pending['title']}"):
-        render_lesson(pending, key_prefix=f"dlg_{pending['id']}")
+    with st.dialog(f"📘 Mini Lesson Quiz: {pending['lesson']['title']}"):
+        render_quiz(pending)
         st.divider()
         if st.button("Close lesson"):
-            st.session_state.pending_lesson = None
+            st.session_state.pending_quiz = None
             st.rerun()
 
-
+# Lesson library
 st.divider()
-st.subheader("📚 Mini Lessons Library (locked parts)")
+st.subheader("📚 Lesson Library (unlocked by locking parts)")
 
 if not st.session_state.build_log:
-    st.info("Lock a part in correctly to unlock mini lessons.")
+    st.info("Lock a correct part to unlock micro-lessons.")
 else:
-    for idx, entry in enumerate(reversed(st.session_state.build_log)):
-        with st.expander(f"{entry['title']} — {entry['part']}"):
-            render_lesson(entry, key_prefix=f"lib_{entry['id']}_{idx}")
+    for i, entry in enumerate(reversed(st.session_state.build_log), start=1):
+        title = entry["lesson"]["title"]
+        with st.expander(f"{i}. {title} — {entry['part_label']} @ {entry['zone_name']}"):
+            render_quiz(entry)
