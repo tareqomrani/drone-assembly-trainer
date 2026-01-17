@@ -1,780 +1,985 @@
-import math
-import time
-from dataclasses import dataclass
-from pathlib import Path
-from typing import Dict, List, Optional, Tuple
-
 import streamlit as st
 import streamlit.components.v1 as components
 
-
-# ============================
-# Local component
-# ============================
-_DRONE_CANVAS = components.declare_component(
-    "drone_canvas",
-    path=str(Path(__file__).parent / "drone_canvas"),
-)
-
-# ============================
-# Tactical HUD CSS
-# ============================
-components.html(
-    """
-<style>
-:root{
-  --bg:#070b08; --panel:#0c1310; --border:#1a2a22;
-  --green:#00ff88; --green-dim:#1f3b2c; --green-glow:rgba(0,255,136,.55);
-  --text:#e8fff3; --text-muted:#9fdcc0;
-  --mono: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
-}
-html, body, [data-testid="stApp"] { background: var(--bg); color: var(--text); font-family: var(--mono); }
-h1,h2,h3,h4 { color: var(--green); letter-spacing:.04em; font-family: var(--mono); }
-small,.stCaption { color: var(--text-muted); font-family: var(--mono); }
-section[data-testid="stSidebar"]{
-  background: var(--panel) !important;
-  border-right: 1px solid var(--border);
-}
-div[data-testid="stContainer"], div[data-testid="stExpander"]{
-  background: var(--panel) !important;
-  border: 1px solid var(--border);
-  border-radius: 12px;
-}
-.hud { color: var(--text-muted); letter-spacing: .08em; text-transform: uppercase; font-size: 12px; }
-</style>
-""",
-    height=0,
-)
-
-# ============================
-# Models
-# ============================
-@dataclass(frozen=True)
-class Zone:
-    key: str
-    display_name: str
-    xy: Tuple[float, float]  # normalized 0..1
-
-
-@dataclass
-class Part:
-    id: str
-    label: str
-    kind: str
-    x: float
-    y: float
-    locked: bool = False
-    locked_zone: Optional[str] = None
-
-
-# ============================
-# Technical icon SVG sprites (embedded, consistent style)
-# ============================
-def svg_icon(kind: str) -> str:
-    stroke = "#00ff88"
-    muted = "#9fdcc0"
-    fill = "rgba(0,0,0,0)"
-
-    if kind == "prop":
-        return f"""<svg xmlns="http://www.w3.org/2000/svg" width="80" height="80" viewBox="0 0 80 80">
-          <g stroke="{stroke}" stroke-width="3" fill="{fill}">
-            <circle cx="40" cy="40" r="6"/>
-            <path d="M40 40 C20 25, 16 18, 18 14 C22 10, 30 16, 40 28 Z"/>
-            <path d="M40 40 C60 25, 64 18, 62 14 C58 10, 50 16, 40 28 Z"/>
-            <path d="M40 40 C25 60, 18 64, 14 62 C10 58, 16 50, 28 40 Z"/>
-            <path d="M40 40 C55 60, 62 64, 66 62 C70 58, 64 50, 52 40 Z"/>
-          </g>
-        </svg>"""
-    if kind == "motor":
-        return f"""<svg xmlns="http://www.w3.org/2000/svg" width="80" height="80" viewBox="0 0 80 80">
-          <g stroke="{stroke}" stroke-width="3" fill="{fill}">
-            <rect x="18" y="18" width="44" height="44" rx="10"/>
-            <circle cx="40" cy="40" r="12"/>
-            <path d="M40 28 L40 52"/>
-            <path d="M28 40 L52 40"/>
-            <circle cx="40" cy="40" r="3" fill="{stroke}"/>
-          </g>
-        </svg>"""
-    if kind == "esc":
-        return f"""<svg xmlns="http://www.w3.org/2000/svg" width="80" height="80" viewBox="0 0 80 80">
-          <g stroke="{stroke}" stroke-width="3" fill="{fill}">
-            <rect x="16" y="22" width="48" height="36" rx="6"/>
-            <path d="M22 30 H58"/><path d="M22 38 H58"/><path d="M22 46 H58"/>
-            <path d="M24 58 C24 66, 18 66, 18 70" />
-            <path d="M40 58 C40 66, 34 66, 34 70" />
-            <path d="M56 58 C56 66, 62 66, 62 70" />
-          </g>
-        </svg>"""
-    if kind == "fc":
-        return f"""<svg xmlns="http://www.w3.org/2000/svg" width="80" height="80" viewBox="0 0 80 80">
-          <g stroke="{stroke}" stroke-width="3" fill="{fill}">
-            <rect x="18" y="18" width="44" height="44" rx="8"/>
-            <circle cx="40" cy="40" r="10"/>
-            <path d="M10 28 H18"/><path d="M10 40 H18"/><path d="M10 52 H18"/>
-            <path d="M62 28 H70"/><path d="M62 40 H70"/><path d="M62 52 H70"/>
-          </g>
-        </svg>"""
-    if kind == "pdb":
-        return f"""<svg xmlns="http://www.w3.org/2000/svg" width="80" height="80" viewBox="0 0 80 80">
-          <g stroke="{stroke}" stroke-width="3" fill="{fill}">
-            <rect x="14" y="20" width="52" height="40" rx="10"/>
-            <circle cx="26" cy="40" r="4" fill="{stroke}"/>
-            <circle cx="40" cy="40" r="4" fill="{stroke}"/>
-            <circle cx="54" cy="40" r="4" fill="{stroke}"/>
-            <path d="M40 20 V12" /><path d="M36 12 H44" />
-          </g>
-        </svg>"""
-    if kind == "rx":
-        return f"""<svg xmlns="http://www.w3.org/2000/svg" width="80" height="80" viewBox="0 0 80 80">
-          <g stroke="{stroke}" stroke-width="3" fill="{fill}">
-            <rect x="18" y="26" width="44" height="28" rx="6"/>
-            <path d="M26 54 V70"/><path d="M54 54 V70"/>
-            <path d="M40 26 V18"/><circle cx="40" cy="18" r="4" fill="{stroke}"/>
-          </g>
-        </svg>"""
-    if kind == "vtx":
-        return f"""<svg xmlns="http://www.w3.org/2000/svg" width="80" height="80" viewBox="0 0 80 80">
-          <g stroke="{stroke}" stroke-width="3" fill="{fill}">
-            <rect x="18" y="24" width="44" height="32" rx="7"/>
-            <path d="M26 56 V68"/><path d="M54 56 V68"/>
-            <path d="M62 30 C70 34, 70 46, 62 50" />
-            <path d="M58 33 C64 36, 64 44, 58 47" />
-          </g>
-        </svg>"""
-    if kind == "antenna":
-        return f"""<svg xmlns="http://www.w3.org/2000/svg" width="80" height="80" viewBox="0 0 80 80">
-          <g stroke="{stroke}" stroke-width="3" fill="{fill}">
-            <path d="M40 64 V24" /><circle cx="40" cy="20" r="5" fill="{stroke}"/>
-            <path d="M26 28 C18 36, 18 48, 26 56" />
-            <path d="M54 28 C62 36, 62 48, 54 56" />
-            <path d="M32 34 C28 38, 28 46, 32 50" />
-            <path d="M48 34 C52 38, 52 46, 48 50" />
-          </g>
-        </svg>"""
-    if kind == "camera":
-        return f"""<svg xmlns="http://www.w3.org/2000/svg" width="80" height="80" viewBox="0 0 80 80">
-          <g stroke="{stroke}" stroke-width="3" fill="{fill}">
-            <rect x="16" y="26" width="48" height="30" rx="8"/>
-            <circle cx="40" cy="41" r="10"/><circle cx="40" cy="41" r="3" fill="{stroke}"/>
-            <path d="M24 26 L30 18 H50 L56 26" />
-          </g>
-        </svg>"""
-
-    return f"""<svg xmlns="http://www.w3.org/2000/svg" width="80" height="80" viewBox="0 0 80 80">
-      <g stroke="{muted}" stroke-width="3" fill="{fill}">
-        <rect x="16" y="16" width="48" height="48" rx="10"/>
-        <text x="40" y="46" text-anchor="middle" fill="{muted}" font-family="monospace" font-size="14">{kind}</text>
-      </g>
-    </svg>"""
-
-
-# ============================
-# Zones (normalized layout)
-# ============================
-ZONES: List[Zone] = [
-    Zone("z_prop_tl", "Prop (TL)", (0.18, 0.22)),
-    Zone("z_prop_tr", "Prop (TR)", (0.82, 0.22)),
-    Zone("z_prop_bl", "Prop (BL)", (0.18, 0.78)),
-    Zone("z_prop_br", "Prop (BR)", (0.82, 0.78)),
-
-    Zone("z_motor_tl", "Motor (TL)", (0.26, 0.30)),
-    Zone("z_motor_tr", "Motor (TR)", (0.74, 0.30)),
-    Zone("z_motor_bl", "Motor (BL)", (0.26, 0.70)),
-    Zone("z_motor_br", "Motor (BR)", (0.74, 0.70)),
-
-    Zone("z_esc_tl", "ESC (TL arm)", (0.35, 0.36)),
-    Zone("z_esc_tr", "ESC (TR arm)", (0.65, 0.36)),
-    Zone("z_esc_bl", "ESC (BL arm)", (0.35, 0.64)),
-    Zone("z_esc_br", "ESC (BR arm)", (0.65, 0.64)),
-
-    Zone("z_rx", "Receiver", (0.42, 0.34)),
-    Zone("z_vtx", "VTX", (0.58, 0.34)),
-    Zone("z_ant", "Antenna", (0.50, 0.16)),
-    Zone("z_pdb", "PDB", (0.50, 0.50)),
-    Zone("z_fc", "Flight Ctrl", (0.50, 0.62)),
-    Zone("z_cam", "Camera", (0.50, 0.86)),
-]
-ZMAP = {z.key: z for z in ZONES}
-
-# Snap radius in normalized units (board is 0..1)
-ZONE_RADIUS_NORM = 0.055
-
-# Allowed kinds per zone
-ZONE_KIND_ALLOWED: Dict[str, List[str]] = {
-    "z_prop_tl": ["prop"], "z_prop_tr": ["prop"], "z_prop_bl": ["prop"], "z_prop_br": ["prop"],
-    "z_motor_tl": ["motor"], "z_motor_tr": ["motor"], "z_motor_bl": ["motor"], "z_motor_br": ["motor"],
-    "z_esc_tl": ["esc"], "z_esc_tr": ["esc"], "z_esc_bl": ["esc"], "z_esc_br": ["esc"],
-    "z_rx": ["rx"],
-    "z_vtx": ["vtx"],
-    "z_ant": ["antenna"],
-    "z_pdb": ["pdb"],
-    "z_fc": ["fc"],
-    "z_cam": ["camera"],
-}
-
-# ============================
-# Lessons + randomized quiz pools (stored per lock event)
-# ============================
-QUIZ_BANK: Dict[str, Dict] = {
-    "prop": {
-        "title": "Propeller",
-        "what": "Generates thrust by accelerating air. Pitch/diameter strongly affect efficiency and current draw.",
-        "gotchas": [
-            "CW/CCW props must match motor direction.",
-            "Oversized props can overcurrent motor/ESC."
-        ],
-        "questions": [
-            ("If prop pitch increases (all else equal), motor load generally…",
-             ["Increases", "Decreases", "Stays identical"], 0),
-            ("A larger prop diameter usually…",
-             ["Increases thrust and current draw", "Always reduces current draw", "Has no effect"], 0),
-        ],
-    },
-    "motor": {
-        "title": "Brushless Motor",
-        "what": "Spins the prop. Kv (~RPM/Volt) influences speed vs torque behavior.",
-        "gotchas": [
-            "High Kv often suits smaller props (higher RPM, lower torque).",
-            "Heat often indicates overload or poor airflow."
-        ],
-        "questions": [
-            ("Higher Kv generally means…",
-             ["More RPM per volt", "More torque per amp", "Lower RPM per volt"], 0),
-            ("If motors overheat, a common cause is…",
-             ["Prop load too high", "Too much altitude", "Too much GPS"], 0),
-        ],
-    },
-    "esc": {
-        "title": "ESC (Electronic Speed Controller)",
-        "what": "Drives the motor using commutation. Must be rated above peak current with margin.",
-        "gotchas": [
-            "Underrated ESCs fail from heat/overcurrent.",
-            "Protocol (PWM/DShot) must match FC."
-        ],
-        "questions": [
-            ("An undersized ESC most commonly fails due to…",
-             ["Overcurrent/overheating", "Too much thrust", "Low battery voltage"], 0),
-            ("ESC current rating should be…",
-             ["Above peak draw with margin", "Exactly equal to peak draw", "Below peak draw"], 0),
-        ],
-    },
-    "pdb": {
-        "title": "Power Distribution Board (PDB)",
-        "what": "Distributes battery power to ESCs and accessories; sometimes adds filtering/BEC.",
-        "gotchas": [
-            "Bad solder joints cause voltage drop + heat.",
-            "Filtering reduces FPV noise and FC interference."
-        ],
-        "questions": [
-            ("A PDB is mainly used to…",
-             ["Distribute battery power", "Control yaw", "Transmit FPV video"], 0),
-            ("A bad power joint often causes…",
-             ["Heat and voltage drop", "More range", "Cleaner video"], 0),
-        ],
-    },
-    "fc": {
-        "title": "Flight Controller",
-        "what": "The brain: reads sensors, runs stabilization loops, commands the ESCs.",
-        "gotchas": [
-            "Wrong orientation/calibration can cause instant flip on arm.",
-            "Vibration isolation improves gyro quality."
-        ],
-        "questions": [
-            ("The FC outputs commands primarily to…",
-             ["ESCs", "Props directly", "Battery cells"], 0),
-            ("Excess vibration mainly hurts…",
-             ["Gyro signal quality", "Prop color", "Receiver binding"], 0),
-        ],
-    },
-    "rx": {
-        "title": "Receiver",
-        "what": "Receives the pilot/control link and feeds commands to the FC.",
-        "gotchas": [
-            "Antenna placement matters (carbon can shadow RF).",
-            "Set failsafe to prevent flyaways."
-        ],
-        "questions": [
-            ("Failsafe defines behavior when…",
-             ["Signal is lost", "Battery is full", "Props are removed"], 0),
-            ("Carbon frames can reduce range by…",
-             ["Blocking/shielding RF", "Increasing thrust", "Charging the battery"], 0),
-        ],
-    },
-    "vtx": {
-        "title": "FPV Video Transmitter (VTX)",
-        "what": "Transmits camera feed. Higher power increases heat and interference risk.",
-        "gotchas": [
-            "Never power a VTX without an antenna.",
-            "High output can overheat if airflow is poor."
-        ],
-        "questions": [
-            ("A VTX should not be powered without…",
-             ["An antenna", "A flight controller", "A motor"], 0),
-            ("Higher VTX power usually…",
-             ["Increases heat", "Always increases battery voltage", "Improves GPS lock"], 0),
-        ],
-    },
-    "antenna": {
-        "title": "Antenna",
-        "what": "Radiates/receives RF. Polarization + placement strongly affect link quality.",
-        "gotchas": [
-            "Match polarization (RHCP with RHCP).",
-            "Avoid shielding by battery/carbon."
-        ],
-        "questions": [
-            ("Mismatched polarization typically…",
-             ["Reduces signal", "Increases thrust", "Improves range"], 0),
-            ("Antenna placement should avoid…",
-             ["Carbon/battery shadowing", "Wind", "Sunlight"], 0),
-        ],
-    },
-    "camera": {
-        "title": "FPV Camera",
-        "what": "Captures the live feed. Low latency and good dynamic range improve control.",
-        "gotchas": [
-            "Tilt affects perceived speed/handling.",
-            "Noise lines often come from power ripple."
-        ],
-        "questions": [
-            ("Higher camera tilt is generally used for…",
-             ["Faster forward flight", "Hover-only flight", "Lower RPM motors"], 0),
-            ("Rolling lines in FPV are often caused by…",
-             ["Power noise", "Too much yaw", "Too many satellites"], 0),
-        ],
-    },
-}
-
-
-# ============================
-# Scoring
-# ============================
-PLACEMENT_POINTS_CORRECT = 10
-PLACEMENT_POINTS_WRONG = -3
-
-QUIZ_POINTS_CORRECT = 15
-QUIZ_POINTS_WRONG = -5
-
-STREAK_BONUS_EVERY = 3
-STREAK_BONUS_POINTS = 10
-
-
-# ============================
-# Utility
-# ============================
-def dist(a: Tuple[float, float], b: Tuple[float, float]) -> float:
-    return math.sqrt((a[0] - b[0]) ** 2 + (a[1] - b[1]) ** 2)
-
-def find_nearest_zone(x: float, y: float) -> Optional[str]:
-    best = None
-    best_d = 1e9
-    for z in ZONES:
-        d = dist((x, y), z.xy)
-        if d < best_d:
-            best_d = d
-            best = z.key
-    if best is not None and best_d <= ZONE_RADIUS_NORM:
-        return best
-    return None
-
-def is_correct(kind: str, zone_key: str) -> bool:
-    return kind in ZONE_KIND_ALLOWED.get(zone_key, [])
-
-def elapsed_s() -> int:
-    return int(time.time() - st.session_state.start_time)
-
-def serialize_parts(parts: List[Part]) -> List[dict]:
-    return [{
-        "id": p.id,
-        "label": p.label,
-        "kind": p.kind,
-        "x": p.x,
-        "y": p.y,
-        "locked": p.locked,
-        "size_px": 74,
-        "svg": svg_icon(p.kind),
-        "disabled": False,
-    } for p in parts]
-
-def serialize_zones() -> List[dict]:
-    return [{"key": z.key, "display_name": z.display_name, "x": z.xy[0], "y": z.xy[1]} for z in ZONES]
-
-def make_event_id(part_id: str, zone_key: str) -> str:
-    return f"{int(time.time()*1000)}_{part_id}_{zone_key}"
-
-def ensure_state():
-    if "parts" not in st.session_state:
-        parts: List[Part] = []
-
-        # staging layout: bottom row for props/motors/escs, upper row for core electronics
-        x0, dx = 0.06, 0.082
-
-        for i in range(4):
-            parts.append(Part(id=f"prop_{i+1}", label=f"Prop {i+1}", kind="prop", x=x0 + dx*i, y=0.92))
-        for i in range(4):
-            parts.append(Part(id=f"motor_{i+1}", label=f"Motor {i+1}", kind="motor", x=x0 + dx*(i+4), y=0.92))
-        for i in range(4):
-            parts.append(Part(id=f"esc_{i+1}", label=f"ESC {i+1}", kind="esc", x=x0 + dx*(i+8), y=0.92))
-
-        core = [
-            ("pdb_1", "PDB", "pdb", 0.08, 0.80),
-            ("fc_1", "FC", "fc", 0.17, 0.80),
-            ("rx_1", "RX", "rx", 0.26, 0.80),
-            ("vtx_1", "VTX", "vtx", 0.35, 0.80),
-            ("ant_1", "ANT", "antenna", 0.44, 0.80),
-            ("cam_1", "CAM", "camera", 0.53, 0.80),
-        ]
-        for pid, label, kind, x, y in core:
-            parts.append(Part(id=pid, label=label, kind=kind, x=x, y=y))
-
-        st.session_state.parts = parts
-
-    st.session_state.setdefault("start_time", time.time())
-    st.session_state.setdefault("score", 0)
-    st.session_state.setdefault("last_msg", "Ready.")
-    st.session_state.setdefault("lock_on", True)
-    st.session_state.setdefault("show_hints", True)
-    st.session_state.setdefault("show_zone_labels", False)
-    st.session_state.setdefault("sound_on", True)
-
-    # placement stats
-    st.session_state.setdefault("wrong_drops", 0)
-    st.session_state.setdefault("correct_snaps", 0)
-
-    # quiz stats
-    st.session_state.setdefault("quiz_streak", 0)
-    st.session_state.setdefault("quiz_best_streak", 0)
-    st.session_state.setdefault("quiz_points_total", 0)
-    st.session_state.setdefault("quiz_correct", 0)
-    st.session_state.setdefault("quiz_wrong", 0)
-    st.session_state.setdefault("quiz_scored", {})  # event_id -> True
-
-    # lessons
-    st.session_state.setdefault("build_log", [])      # list[dict]
-    st.session_state.setdefault("pending_quiz", None) # dict or None
-
-    # for JS animations/sfx
-    st.session_state.setdefault("server_event", None) # dict or None
-
-
-def reset_all():
-    # Reset parts to staging
-    parts: List[Part] = st.session_state.parts
-    x0, dx = 0.06, 0.082
-    idx = 0
-    core_positions = {
-        "pdb": (0.08, 0.80), "fc": (0.17, 0.80), "rx": (0.26, 0.80),
-        "vtx": (0.35, 0.80), "antenna": (0.44, 0.80), "camera": (0.53, 0.80),
-    }
-
-    for p in parts:
-        p.locked = False
-        p.locked_zone = None
-
-        if p.kind in ("prop", "motor", "esc"):
-            p.x = x0 + dx * idx
-            p.y = 0.92
-            idx += 1
-        else:
-            p.x, p.y = core_positions.get(p.kind, (0.08, 0.80))
-
-    st.session_state.start_time = time.time()
-    st.session_state.score = 0
-    st.session_state.last_msg = "Reset."
-    st.session_state.wrong_drops = 0
-    st.session_state.correct_snaps = 0
-
-    st.session_state.quiz_streak = 0
-    st.session_state.quiz_best_streak = 0
-    st.session_state.quiz_points_total = 0
-    st.session_state.quiz_correct = 0
-    st.session_state.quiz_wrong = 0
-    st.session_state.quiz_scored = {}
-
-    st.session_state.build_log = []
-    st.session_state.pending_quiz = None
-    st.session_state.server_event = None
-
-
-def apply_quiz_result(entry: dict, is_correct_ans: bool):
-    eid = entry["id"]
-    if st.session_state.quiz_scored.get(eid):
-        return
-    st.session_state.quiz_scored[eid] = True
-
-    if is_correct_ans:
-        st.session_state.score += QUIZ_POINTS_CORRECT
-        st.session_state.quiz_points_total += QUIZ_POINTS_CORRECT
-        st.session_state.quiz_correct += 1
-
-        st.session_state.quiz_streak += 1
-        st.session_state.quiz_best_streak = max(st.session_state.quiz_best_streak, st.session_state.quiz_streak)
-
-        if st.session_state.quiz_streak % STREAK_BONUS_EVERY == 0:
-            st.session_state.score += STREAK_BONUS_POINTS
-            st.session_state.quiz_points_total += STREAK_BONUS_POINTS
-            st.toast(f"🔥 Streak bonus! +{STREAK_BONUS_POINTS}", icon="🔥")
-    else:
-        st.session_state.score += QUIZ_POINTS_WRONG
-        st.session_state.quiz_points_total += QUIZ_POINTS_WRONG
-        st.session_state.quiz_wrong += 1
-        st.session_state.quiz_streak = 0
-
-
-def render_quiz(entry: dict):
-    lesson = entry["lesson"]
-    q, opts, correct_i = entry["question"]
-
-    st.markdown(f"### {lesson['title']}")
-    st.caption(f"Locked: **{entry['part_label']}** → **{entry['zone_name']}**")
-    st.write(lesson["what"])
-    st.write("**Gotchas:**")
-    for g in lesson["gotchas"]:
-        st.write(f"• {g}")
-
-    choice = st.radio(q, opts, key=f"quiz_choice_{entry['id']}")
-
-    scored = bool(st.session_state.quiz_scored.get(entry["id"], False))
-    if st.button("Check answer", key=f"quiz_check_{entry['id']}", disabled=scored):
-        is_correct_ans = (opts.index(choice) == correct_i)
-        apply_quiz_result(entry, is_correct_ans)
-        if is_correct_ans:
-            st.success(f"✅ Correct! +{QUIZ_POINTS_CORRECT}")
-        else:
-            st.error(f"❌ Not quite. Correct: **{opts[correct_i]}** ({QUIZ_POINTS_WRONG})")
-        st.rerun()
-
-    if scored:
-        st.info("Quiz already scored for this lesson ✅ (no farming).")
-    else:
-        st.caption(f"Rewards: +{QUIZ_POINTS_CORRECT} correct / {QUIZ_POINTS_WRONG} wrong")
-
-
-def compute_grade() -> Tuple[str, Dict[str, float]]:
-    """
-    Grade uses time, wrong drops, quiz accuracy, and best streak.
-    Produces a 0..100 score then maps to letter.
-    """
-    t = max(1, elapsed_s())
-    wrong = st.session_state.wrong_drops
-    qc = st.session_state.quiz_correct
-    qw = st.session_state.quiz_wrong
-    total_q = qc + qw
-    acc = (qc / total_q) if total_q else 0.0
-    best_streak = st.session_state.quiz_best_streak
-
-    # Time score: 0..35 points (fast is better)
-    # ~2 minutes => near max, ~8 minutes => low
-    time_score = max(0.0, 35.0 * (1.0 - min(1.0, (t - 120) / 360)))
-
-    # Accuracy score: 0..35
-    acc_score = 35.0 * acc
-
-    # Streak score: 0..20 (cap at 10)
-    streak_score = 20.0 * min(1.0, best_streak / 10.0)
-
-    # Penalty: wrong drops 0..20
-    penalty = min(20.0, wrong * 2.0)
-
-    raw = time_score + acc_score + streak_score - penalty
-    score100 = max(0.0, min(100.0, raw))
-
-    if score100 >= 95: grade = "A+"
-    elif score100 >= 90: grade = "A"
-    elif score100 >= 80: grade = "B"
-    elif score100 >= 70: grade = "C"
-    elif score100 >= 60: grade = "D"
-    else: grade = "F"
-
-    return grade, {
-        "score100": score100,
-        "time_score": time_score,
-        "acc_score": acc_score,
-        "streak_score": streak_score,
-        "penalty": penalty,
-        "accuracy": acc,
-    }
-
-
-def apply_drag_event(ev: dict):
-    """
-    Process drag-end from JS:
-    - update pos
-    - if near zone -> snap to center (server authoritative)
-    - if correct -> award points and maybe lock
-    - create quiz event on lock (randomized question)
-    - set server_event for JS (snap animation + pulse + sound)
-    """
-    st.session_state.server_event = None
-
-    if not ev or ev.get("type") != "drag":
-        return
-
-    pid = ev["id"]
-    x = float(ev["x"])
-    y = float(ev["y"])
-
-    parts: List[Part] = st.session_state.parts
-    p = next((p for p in parts if p.id == pid), None)
-    if p is None or p.locked:
-        return
-
-    # raw move
-    p.x, p.y = x, y
-
-    zkey = find_nearest_zone(x, y)
-    if not zkey:
-        st.session_state.last_msg = f"Moved: {p.label}"
-        return
-
-    # zone occupied by a locked part?
-    occupied = any((q.locked and q.locked_zone == zkey) for q in parts)
-    if occupied:
-        st.session_state.last_msg = f"Zone occupied: {ZMAP[zkey].display_name}"
-        st.session_state.server_event = {"type": "wrong"}
-        st.session_state.wrong_drops += 1
-        return
-
-    # authoritative snap to center
-    zx, zy = ZMAP[zkey].xy
-    p.x, p.y = zx, zy
-    st.session_state.server_event = {"type": "snap", "part_id": p.id, "x": zx, "y": zy}
-
-    if is_correct(p.kind, zkey):
-        st.session_state.score += PLACEMENT_POINTS_CORRECT
-        st.session_state.correct_snaps += 1
-        st.session_state.last_msg = f"✅ Snapped: {p.label} → {ZMAP[zkey].display_name} (+{PLACEMENT_POINTS_CORRECT})"
-
-        # lock if enabled
-        if st.session_state.lock_on:
-            p.locked = True
-            p.locked_zone = zkey
-            st.session_state.score += 15  # lock bonus
-
-            lesson = QUIZ_BANK.get(p.kind)
-            if lesson:
-                # Pick a question at lock-time and store it in the entry (prevents rerun changing question)
-                q = lesson["questions"][int(time.time() * 1000) % len(lesson["questions"])]
-
-                entry = {
-                    "id": make_event_id(p.id, zkey),
-                    "ts": time.time(),
-                    "part_id": p.id,
-                    "part_label": p.label,
-                    "kind": p.kind,
-                    "zone_key": zkey,
-                    "zone_name": ZMAP[zkey].display_name,
-                    "lesson": lesson,
-                    "question": q,
-                }
-                st.session_state.build_log.append(entry)
-                st.session_state.pending_quiz = entry
-
-            st.session_state.server_event = {"type": "lock", "part_id": p.id, "zone_key": zkey}
-            st.toast(f"🔒 Locked: {QUIZ_BANK.get(p.kind, {}).get('title', p.label)} — quiz unlocked", icon="🔒")
-        else:
-            st.session_state.server_event = {"type": "correct", "zone_key": zkey}
-    else:
-        st.session_state.score += PLACEMENT_POINTS_WRONG
-        st.session_state.wrong_drops += 1
-        st.session_state.last_msg = f"❌ Wrong zone: {p.label} near {ZMAP[zkey].display_name} ({PLACEMENT_POINTS_WRONG})"
-        st.session_state.server_event = {"type": "wrong", "zone_key": zkey}
-
-
-def is_win(parts: List[Part]) -> bool:
-    return all(p.locked for p in parts)
-
-
-# ============================
-# App UI
-# ============================
 st.set_page_config(page_title="Drone Assembly Trainer", layout="wide")
-ensure_state()
 
-st.title("🧩 Drone Assembly Trainer — Drag Anywhere (All Features)")
-st.markdown('<div class="hud">SYSTEM: DRONE-ASSEMBLY // MODE: TRAINING // THEME: DIGITAL-GREEN</div>', unsafe_allow_html=True)
-st.caption("Drag parts anywhere. Drop near a zone to snap (animated). Correct locks unlock micro-lessons + randomized quizzes.")
+st.title("🧩 Drone Assembly Trainer — One-File Build (Drag Anywhere)")
+st.caption("All gameplay runs client-side (canvas). No assets folders. No component folders. Works on Streamlit Cloud.")
 
-with st.sidebar:
-    st.subheader("Controls")
-    st.session_state.show_hints = st.toggle("Show hint rings", value=st.session_state.show_hints)
-    st.session_state.show_zone_labels = st.toggle("Show zone labels", value=st.session_state.show_zone_labels)
-    st.session_state.lock_on = st.toggle("Lock correct snaps", value=st.session_state.lock_on)
-    st.session_state.sound_on = st.toggle("Sound effects", value=st.session_state.sound_on)
+components.html(
+    r"""
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8"/>
+  <meta name="viewport" content="width=device-width,initial-scale=1"/>
+  <script src="https://unpkg.com/konva@9/konva.min.js"></script>
+  <style>
+    :root{
+      --bg:#070b08; --panel:#0c1310; --border:#1a2a22;
+      --green:#00ff88; --muted:#9fdcc0; --text:#e8fff3;
+      --mono: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
+    }
+    html, body { margin:0; padding:0; background:var(--bg); color:var(--text); font-family:var(--mono); }
+    .wrap{ width:100%; padding:10px 10px 14px; box-sizing:border-box; }
+    .top{
+      display:flex; gap:12px; flex-wrap:wrap; align-items:stretch;
+    }
+    .panel{
+      background:var(--panel); border:1px solid var(--border); border-radius:12px;
+      padding:10px 12px; box-sizing:border-box;
+    }
+    .hudline{
+      color:var(--muted); letter-spacing:.08em; text-transform:uppercase;
+      font-size:12px; margin:0 0 8px;
+      user-select:none; -webkit-user-select:none;
+    }
+    .stats{
+      min-width:260px; flex: 0 0 290px;
+      display:flex; flex-direction:column; gap:8px;
+    }
+    .grid{
+      display:grid; grid-template-columns: repeat(2, minmax(120px, 1fr));
+      gap:8px;
+    }
+    .kpi{
+      border:1px solid var(--border); border-radius:10px; padding:8px 10px;
+    }
+    .kpi .lab{ color:var(--muted); font-size:11px; letter-spacing:.08em; text-transform:uppercase;}
+    .kpi .val{ font-size:18px; margin-top:4px; color:var(--green); }
+    .controls{
+      display:flex; gap:10px; flex-wrap:wrap; align-items:center;
+      border-top:1px dashed var(--border); padding-top:10px; margin-top:8px;
+    }
+    button, label{
+      font-family:var(--mono);
+      font-size:12px;
+    }
+    button{
+      background:#0a1a12; color:var(--text);
+      border:1px solid var(--border); border-radius:10px;
+      padding:8px 10px; cursor:pointer;
+    }
+    button:hover{ border-color: var(--green); }
+    .toggle{ display:flex; gap:6px; align-items:center; color:var(--muted); }
+    input[type="checkbox"]{ accent-color: var(--green); transform: scale(1.05); }
+    .msg{
+      color:var(--muted); font-size:12px; margin-top:10px;
+      border-top:1px dashed var(--border); padding-top:10px;
+      min-height:18px;
+    }
+    .boardpanel{ flex: 1 1 520px; min-width: 320px; }
+    #stageWrap{ width:100%; }
+    #stage{ width:100%; }
+    .quizOverlay{
+      position:fixed; left:0; top:0; right:0; bottom:0;
+      background: rgba(0,0,0,0.62);
+      display:none; align-items:center; justify-content:center;
+      padding:18px; box-sizing:border-box;
+      z-index:9999;
+    }
+    .quizCard{
+      width:min(720px, 96vw);
+      background:var(--panel);
+      border:1px solid var(--green);
+      border-radius:14px;
+      padding:14px 14px 12px;
+      box-shadow: 0 0 22px rgba(0,255,136,0.18);
+    }
+    .quizTitle{ color:var(--green); letter-spacing:.06em; text-transform:uppercase; font-size:14px; margin:0 0 6px;}
+    .quizSub{ color:var(--muted); font-size:12px; margin:0 0 10px;}
+    .quizWhat{ margin:0 0 10px; font-size:13px; line-height:1.35;}
+    .quizGotchas{ color:var(--muted); font-size:12px; margin:0 0 10px;}
+    .quizQ{ margin:10px 0 8px; font-size:13px;}
+    .optRow{ display:flex; flex-direction:column; gap:6px; margin-bottom:12px;}
+    .optRow label{ color:var(--text); }
+    .quizBtns{ display:flex; gap:10px; flex-wrap:wrap; align-items:center; }
+    .pill{
+      display:inline-block; padding:2px 10px; border-radius:999px;
+      border:1px solid rgba(0,255,136,0.45);
+      background:#0a1a12;
+      color:var(--green);
+      font-size:11px;
+      letter-spacing:.06em;
+      text-transform:uppercase;
+    }
+    .result{ margin-top:10px; font-size:12px; color:var(--muted); min-height:18px; }
+  </style>
+</head>
+<body>
+<div class="wrap">
+  <div class="top">
+    <div class="panel stats">
+      <div class="hudline" id="hudLine">DRONE ASSEMBLY // DRAG ANYWHERE // DROP NEAR ZONES TO SNAP</div>
 
-    if st.button("Reset"):
-        reset_all()
-        st.rerun()
+      <div class="grid">
+        <div class="kpi"><div class="lab">Score</div><div class="val" id="kScore">0</div></div>
+        <div class="kpi"><div class="lab">Time (s)</div><div class="val" id="kTime">0</div></div>
+        <div class="kpi"><div class="lab">Quiz Streak</div><div class="val" id="kStreak">0</div></div>
+        <div class="kpi"><div class="lab">Best Streak</div><div class="val" id="kBest">0</div></div>
+        <div class="kpi"><div class="lab">Wrong Drops</div><div class="val" id="kWrong">0</div></div>
+        <div class="kpi"><div class="lab">Grade</div><div class="val" id="kGrade">—</div></div>
+      </div>
 
-# HUD metrics
-hudL, hudR = st.columns([0.70, 0.30], gap="large")
-with hudR:
-    grade, breakdown = compute_grade()
+      <div class="controls">
+        <div class="toggle"><input id="tHints" type="checkbox" checked><label for="tHints">Hint rings</label></div>
+        <div class="toggle"><input id="tLabels" type="checkbox"><label for="tLabels">Zone labels</label></div>
+        <div class="toggle"><input id="tLock" type="checkbox" checked><label for="tLock">Lock correct</label></div>
+        <div class="toggle"><input id="tSound" type="checkbox" checked><label for="tSound">Sound</label></div>
+        <button id="btnReset">Reset</button>
+      </div>
 
-    st.metric("Score", st.session_state.score)
-    st.metric("Time (s)", elapsed_s())
-    st.metric("Grade", grade)
-    st.metric("Wrong Drops", st.session_state.wrong_drops)
-    st.metric("Quiz Streak", st.session_state.quiz_streak)
-    st.metric("Best Streak", st.session_state.quiz_best_streak)
-    st.metric("Quiz Points", st.session_state.quiz_points_total)
+      <div class="msg" id="msg">Ready.</div>
+    </div>
 
-    st.info(st.session_state.last_msg)
+    <div class="panel boardpanel">
+      <div class="hudline" id="hoverLine">HOVER: —</div>
+      <div id="stageWrap"><div id="stage"></div></div>
+    </div>
+  </div>
+</div>
 
-    st.write("**Streak meter**")
-    st.progress(min(1.0, st.session_state.quiz_streak / 10.0))
-    st.caption(f"Every {STREAK_BONUS_EVERY} correct answers: **+{STREAK_BONUS_POINTS} bonus**")
+<!-- Quiz overlay -->
+<div class="quizOverlay" id="quizOverlay">
+  <div class="quizCard">
+    <div style="display:flex; justify-content:space-between; align-items:center; gap:10px;">
+      <div>
+        <div class="quizTitle" id="qTitle">Mini Lesson</div>
+        <div class="quizSub" id="qSub">Locked: —</div>
+      </div>
+      <span class="pill" id="qPill">QUIZ</span>
+    </div>
 
-    st.write("**Mission grade breakdown**")
-    st.caption(
-        f"Score100: {breakdown['score100']:.1f} | "
-        f"Time: {breakdown['time_score']:.1f} | "
-        f"Accuracy: {breakdown['acc_score']:.1f} | "
-        f"Streak: {breakdown['streak_score']:.1f} | "
-        f"Penalty: -{breakdown['penalty']:.1f}"
-    )
+    <p class="quizWhat" id="qWhat"></p>
+    <div class="quizGotchas" id="qGotchas"></div>
 
-# Canvas (responsive sizing happens inside JS via container width)
-ev = _DRONE_CANVAS(
-    key="drone_canvas",
-    parts=serialize_parts(st.session_state.parts),
-    zones=serialize_zones(),
-    show_hints=st.session_state.show_hints,
-    show_zone_labels=st.session_state.show_zone_labels,
-    zone_radius_norm=ZONE_RADIUS_NORM,
-    board_aspect=1100 / 680,
-    hud_line="DRONE ASSEMBLY // DRAG ANYWHERE // DROP NEAR ZONES TO SNAP",
-    sound_on=st.session_state.sound_on,
-    server_event=st.session_state.server_event,
+    <div class="quizQ" id="qQuestion"></div>
+    <div class="optRow" id="qOptions"></div>
+
+    <div class="quizBtns">
+      <button id="btnCheck">Check answer</button>
+      <button id="btnClose">Close</button>
+      <span class="pill" id="qReward">+15 / -5</span>
+      <span class="pill" id="qStreak">STREAK BONUS: every 3 = +10</span>
+    </div>
+
+    <div class="result" id="qResult"></div>
+  </div>
+</div>
+
+<script>
+(() => {
+  // --------------------- Persistence ---------------------
+  const STORE_KEY = "drone_assembly_onefile_v1";
+  const nowMs = () => Date.now();
+
+  function loadState() {
+    try {
+      const raw = localStorage.getItem(STORE_KEY);
+      if (!raw) return null;
+      return JSON.parse(raw);
+    } catch(e) { return null; }
+  }
+  function saveState() {
+    try { localStorage.setItem(STORE_KEY, JSON.stringify(state)); } catch(e) {}
+  }
+
+  // --------------------- WebAudio SFX ---------------------
+  let audioCtx = null;
+  function ctx() {
+    if (!audioCtx) audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+    return audioCtx;
+  }
+  function playTone(freq, dur, type="sine", gain=0.06) {
+    const c = ctx();
+    const o = c.createOscillator();
+    const g = c.createGain();
+    o.type = type;
+    o.frequency.value = freq;
+    g.gain.value = gain;
+    o.connect(g); g.connect(c.destination);
+    const t0 = c.currentTime;
+    g.gain.setValueAtTime(gain, t0);
+    g.gain.exponentialRampToValueAtTime(0.0001, t0 + dur);
+    o.start(t0);
+    o.stop(t0 + dur);
+  }
+  function playNoiseThud(dur=0.14, gain=0.06) {
+    const c = ctx();
+    const bufferSize = Math.floor(c.sampleRate * dur);
+    const buffer = c.createBuffer(1, bufferSize, c.sampleRate);
+    const data = buffer.getChannelData(0);
+    for (let i=0;i<bufferSize;i++) data[i] = (Math.random()*2-1) * (1 - i/bufferSize);
+    const src = c.createBufferSource();
+    src.buffer = buffer;
+    const g = c.createGain();
+    g.gain.value = gain;
+    src.connect(g); g.connect(c.destination);
+    src.start();
+  }
+  function sfx(name) {
+    if (!state.sound_on) return;
+    try {
+      if (name === "drag")   playTone(420, 0.03, "square", 0.03);
+      if (name === "correct"){ playTone(740, 0.08, "sine", 0.06); playTone(980, 0.10, "sine", 0.035); }
+      if (name === "wrong")  playNoiseThud(0.12, 0.06);
+      if (name === "lock")   { playTone(600, 0.05, "triangle", 0.04); playTone(900, 0.06, "triangle", 0.03); }
+      if (name === "win")    { playTone(420,0.10,"sine",0.04); playTone(640,0.12,"sine",0.04); playTone(980,0.14,"sine",0.04); }
+    } catch(e) {}
+  }
+
+  // --------------------- SVG icons (technical icon style) ---------------------
+  const SVG = {
+    prop: (stroke="#00ff88") => `
+      <svg xmlns="http://www.w3.org/2000/svg" width="80" height="80" viewBox="0 0 80 80">
+        <g stroke="${stroke}" stroke-width="3" fill="rgba(0,0,0,0)">
+          <circle cx="40" cy="40" r="6"/>
+          <path d="M40 40 C20 25, 16 18, 18 14 C22 10, 30 16, 40 28 Z"/>
+          <path d="M40 40 C60 25, 64 18, 62 14 C58 10, 50 16, 40 28 Z"/>
+          <path d="M40 40 C25 60, 18 64, 14 62 C10 58, 16 50, 28 40 Z"/>
+          <path d="M40 40 C55 60, 62 64, 66 62 C70 58, 64 50, 52 40 Z"/>
+        </g>
+      </svg>`,
+    motor: (stroke="#00ff88") => `
+      <svg xmlns="http://www.w3.org/2000/svg" width="80" height="80" viewBox="0 0 80 80">
+        <g stroke="${stroke}" stroke-width="3" fill="rgba(0,0,0,0)">
+          <rect x="18" y="18" width="44" height="44" rx="10"/>
+          <circle cx="40" cy="40" r="12"/>
+          <path d="M40 28 L40 52"/><path d="M28 40 L52 40"/>
+          <circle cx="40" cy="40" r="3" fill="${stroke}"/>
+        </g>
+      </svg>`,
+    esc: (stroke="#00ff88") => `
+      <svg xmlns="http://www.w3.org/2000/svg" width="80" height="80" viewBox="0 0 80 80">
+        <g stroke="${stroke}" stroke-width="3" fill="rgba(0,0,0,0)">
+          <rect x="16" y="22" width="48" height="36" rx="6"/>
+          <path d="M22 30 H58"/><path d="M22 38 H58"/><path d="M22 46 H58"/>
+          <path d="M24 58 C24 66, 18 66, 18 70"/>
+          <path d="M40 58 C40 66, 34 66, 34 70"/>
+          <path d="M56 58 C56 66, 62 66, 62 70"/>
+        </g>
+      </svg>`,
+    fc: (stroke="#00ff88") => `
+      <svg xmlns="http://www.w3.org/2000/svg" width="80" height="80" viewBox="0 0 80 80">
+        <g stroke="${stroke}" stroke-width="3" fill="rgba(0,0,0,0)">
+          <rect x="18" y="18" width="44" height="44" rx="8"/>
+          <circle cx="40" cy="40" r="10"/>
+          <path d="M10 28 H18"/><path d="M10 40 H18"/><path d="M10 52 H18"/>
+          <path d="M62 28 H70"/><path d="M62 40 H70"/><path d="M62 52 H70"/>
+        </g>
+      </svg>`,
+    pdb: (stroke="#00ff88") => `
+      <svg xmlns="http://www.w3.org/2000/svg" width="80" height="80" viewBox="0 0 80 80">
+        <g stroke="${stroke}" stroke-width="3" fill="rgba(0,0,0,0)">
+          <rect x="14" y="20" width="52" height="40" rx="10"/>
+          <circle cx="26" cy="40" r="4" fill="${stroke}"/>
+          <circle cx="40" cy="40" r="4" fill="${stroke}"/>
+          <circle cx="54" cy="40" r="4" fill="${stroke}"/>
+          <path d="M40 20 V12"/><path d="M36 12 H44"/>
+        </g>
+      </svg>`,
+    rx: (stroke="#00ff88") => `
+      <svg xmlns="http://www.w3.org/2000/svg" width="80" height="80" viewBox="0 0 80 80">
+        <g stroke="${stroke}" stroke-width="3" fill="rgba(0,0,0,0)">
+          <rect x="18" y="26" width="44" height="28" rx="6"/>
+          <path d="M26 54 V70"/><path d="M54 54 V70"/>
+          <path d="M40 26 V18"/><circle cx="40" cy="18" r="4" fill="${stroke}"/>
+        </g>
+      </svg>`,
+    vtx: (stroke="#00ff88") => `
+      <svg xmlns="http://www.w3.org/2000/svg" width="80" height="80" viewBox="0 0 80 80">
+        <g stroke="${stroke}" stroke-width="3" fill="rgba(0,0,0,0)">
+          <rect x="18" y="24" width="44" height="32" rx="7"/>
+          <path d="M26 56 V68"/><path d="M54 56 V68"/>
+          <path d="M62 30 C70 34, 70 46, 62 50"/><path d="M58 33 C64 36, 64 44, 58 47"/>
+        </g>
+      </svg>`,
+    antenna: (stroke="#00ff88") => `
+      <svg xmlns="http://www.w3.org/2000/svg" width="80" height="80" viewBox="0 0 80 80">
+        <g stroke="${stroke}" stroke-width="3" fill="rgba(0,0,0,0)">
+          <path d="M40 64 V24"/><circle cx="40" cy="20" r="5" fill="${stroke}"/>
+          <path d="M26 28 C18 36, 18 48, 26 56"/>
+          <path d="M54 28 C62 36, 62 48, 54 56"/>
+          <path d="M32 34 C28 38, 28 46, 32 50"/>
+          <path d="M48 34 C52 38, 52 46, 48 50"/>
+        </g>
+      </svg>`,
+    camera: (stroke="#00ff88") => `
+      <svg xmlns="http://www.w3.org/2000/svg" width="80" height="80" viewBox="0 0 80 80">
+        <g stroke="${stroke}" stroke-width="3" fill="rgba(0,0,0,0)">
+          <rect x="16" y="26" width="48" height="30" rx="8"/>
+          <circle cx="40" cy="41" r="10"/><circle cx="40" cy="41" r="3" fill="${stroke}"/>
+          <path d="M24 26 L30 18 H50 L56 26"/>
+        </g>
+      </svg>`,
+  };
+
+  function svgToImage(svgText) {
+    return new Promise((resolve) => {
+      const img = new Image();
+      const svg64 = btoa(unescape(encodeURIComponent(svgText)));
+      img.onload = () => resolve(img);
+      img.src = "data:image/svg+xml;base64," + svg64;
+    });
+  }
+
+  // --------------------- Zones + rules ---------------------
+  const zones = [
+    { key:"z_prop_tl",   name:"Prop (TL)",   x:0.18, y:0.22, allow:["prop"] },
+    { key:"z_prop_tr",   name:"Prop (TR)",   x:0.82, y:0.22, allow:["prop"] },
+    { key:"z_prop_bl",   name:"Prop (BL)",   x:0.18, y:0.78, allow:["prop"] },
+    { key:"z_prop_br",   name:"Prop (BR)",   x:0.82, y:0.78, allow:["prop"] },
+
+    { key:"z_motor_tl",  name:"Motor (TL)",  x:0.26, y:0.30, allow:["motor"] },
+    { key:"z_motor_tr",  name:"Motor (TR)",  x:0.74, y:0.30, allow:["motor"] },
+    { key:"z_motor_bl",  name:"Motor (BL)",  x:0.26, y:0.70, allow:["motor"] },
+    { key:"z_motor_br",  name:"Motor (BR)",  x:0.74, y:0.70, allow:["motor"] },
+
+    { key:"z_esc_tl",    name:"ESC (TL arm)",x:0.35, y:0.36, allow:["esc"] },
+    { key:"z_esc_tr",    name:"ESC (TR arm)",x:0.65, y:0.36, allow:["esc"] },
+    { key:"z_esc_bl",    name:"ESC (BL arm)",x:0.35, y:0.64, allow:["esc"] },
+    { key:"z_esc_br",    name:"ESC (BR arm)",x:0.65, y:0.64, allow:["esc"] },
+
+    { key:"z_rx",        name:"Receiver",    x:0.42, y:0.34, allow:["rx"] },
+    { key:"z_vtx",       name:"VTX",         x:0.58, y:0.34, allow:["vtx"] },
+    { key:"z_ant",       name:"Antenna",     x:0.50, y:0.16, allow:["antenna"] },
+    { key:"z_pdb",       name:"PDB",         x:0.50, y:0.50, allow:["pdb"] },
+    { key:"z_fc",        name:"Flight Ctrl", x:0.50, y:0.62, allow:["fc"] },
+    { key:"z_cam",       name:"Camera",      x:0.50, y:0.86, allow:["camera"] },
+  ];
+
+  const ZONE_RADIUS_N = 0.055;
+
+  // --------------------- Lessons + quiz pools ---------------------
+  const QUIZ = {
+    prop: {
+      title:"Propeller",
+      what:"Generates thrust by accelerating air. Pitch/diameter strongly affect efficiency and current draw.",
+      gotchas:["CW/CCW props must match motor direction.","Oversized props can overcurrent motor/ESC."],
+      questions:[
+        ["If prop pitch increases (all else equal), motor load generally…", ["Increases","Decreases","Stays identical"], 0],
+        ["A larger prop diameter usually…", ["Increases thrust and current draw","Always reduces current draw","Has no effect"], 0]
+      ]
+    },
+    motor: {
+      title:"Brushless Motor",
+      what:"Spins the prop. Kv (~RPM/Volt) influences speed vs torque behavior.",
+      gotchas:["High Kv often suits smaller props.","Heat often indicates overload or poor airflow."],
+      questions:[
+        ["Higher Kv generally means…", ["More RPM per volt","More torque per amp","Lower RPM per volt"], 0],
+        ["If motors overheat, a common cause is…", ["Prop load too high","Too much altitude","Too much GPS"], 0]
+      ]
+    },
+    esc: {
+      title:"ESC",
+      what:"Drives the motor using commutation. Must be rated above peak current with margin.",
+      gotchas:["Underrated ESCs fail from heat/overcurrent.","Protocol must match FC."],
+      questions:[
+        ["An undersized ESC most commonly fails due to…", ["Overcurrent/overheating","Too much thrust","Low battery voltage"], 0],
+        ["ESC current rating should be…", ["Above peak draw with margin","Exactly equal to peak draw","Below peak draw"], 0]
+      ]
+    },
+    pdb: {
+      title:"Power Distribution Board (PDB)",
+      what:"Distributes battery power to ESCs and accessories; sometimes adds filtering/BEC.",
+      gotchas:["Bad solder joints cause voltage drop + heat.","Filtering reduces FPV noise."],
+      questions:[
+        ["A PDB is mainly used to…", ["Distribute battery power","Control yaw","Transmit FPV video"], 0],
+        ["A bad power joint often causes…", ["Heat and voltage drop","More range","Cleaner video"], 0]
+      ]
+    },
+    fc: {
+      title:"Flight Controller",
+      what:"The brain: reads sensors, runs stabilization loops, commands the ESCs.",
+      gotchas:["Wrong orientation can flip instantly.","Vibration hurts gyro data."],
+      questions:[
+        ["The FC outputs commands primarily to…", ["ESCs","Props directly","Battery cells"], 0],
+        ["Excess vibration mainly hurts…", ["Gyro signal quality","Prop color","Receiver binding"], 0]
+      ]
+    },
+    rx: {
+      title:"Receiver",
+      what:"Receives the pilot/control link and feeds commands to the FC.",
+      gotchas:["Carbon can shadow RF.","Set failsafe to prevent flyaways."],
+      questions:[
+        ["Failsafe defines behavior when…", ["Signal is lost","Battery is full","Props are removed"], 0],
+        ["Carbon frames can reduce range by…", ["Blocking/shielding RF","Increasing thrust","Charging the battery"], 0]
+      ]
+    },
+    vtx: {
+      title:"FPV Video Transmitter (VTX)",
+      what:"Transmits camera feed. Higher power increases heat and interference risk.",
+      gotchas:["Never power a VTX without an antenna.","High power can overheat without airflow."],
+      questions:[
+        ["A VTX should not be powered without…", ["An antenna","A flight controller","A motor"], 0],
+        ["Higher VTX power usually…", ["Increases heat","Always increases battery voltage","Improves GPS lock"], 0]
+      ]
+    },
+    antenna: {
+      title:"Antenna",
+      what:"Radiates/receives RF. Polarization + placement strongly affect link quality.",
+      gotchas:["Match polarization (RHCP with RHCP).","Avoid shielding by battery/carbon."],
+      questions:[
+        ["Mismatched polarization typically…", ["Reduces signal","Increases thrust","Improves range"], 0],
+        ["Antenna placement should avoid…", ["Carbon/battery shadowing","Wind","Sunlight"], 0]
+      ]
+    },
+    camera: {
+      title:"FPV Camera",
+      what:"Captures the live feed. Low latency and dynamic range improve control.",
+      gotchas:["Tilt affects perceived speed.","Noise lines often come from power ripple."],
+      questions:[
+        ["Higher camera tilt is generally used for…", ["Faster forward flight","Hover-only flight","Lower RPM motors"], 0],
+        ["Rolling lines in FPV are often caused by…", ["Power noise","Too much yaw","Too many satellites"], 0]
+      ]
+    },
+  };
+
+  // --------------------- State ---------------------
+  const defaultState = () => ({
+    start_ms: nowMs(),
+    score: 0,
+    wrong: 0,
+    quiz_streak: 0,
+    best_streak: 0,
+    quiz_scored: {},          // lockEventId -> true
+    build_log: [],            // entries for library
+    pending_quiz: null,       // current quiz entry
+    lock_on: true,
+    show_hints: true,
+    show_labels: false,
+    sound_on: true,
+    parts: initParts(),       // array
+  });
+
+  function initParts() {
+    const parts = [];
+    const x0 = 0.06, dx = 0.082;
+
+    for (let i=0;i<4;i++) parts.push({id:`prop_${i+1}`, label:`Prop ${i+1}`, kind:"prop", x:x0+dx*i, y:0.92, locked:false, zone:null});
+    for (let i=0;i<4;i++) parts.push({id:`motor_${i+1}`, label:`Motor ${i+1}`, kind:"motor", x:x0+dx*(i+4), y:0.92, locked:false, zone:null});
+    for (let i=0;i<4;i++) parts.push({id:`esc_${i+1}`, label:`ESC ${i+1}`, kind:"esc", x:x0+dx*(i+8), y:0.92, locked:false, zone:null});
+
+    parts.push({id:"pdb_1", label:"PDB", kind:"pdb", x:0.08, y:0.80, locked:false, zone:null});
+    parts.push({id:"fc_1", label:"FC", kind:"fc", x:0.17, y:0.80, locked:false, zone:null});
+    parts.push({id:"rx_1", label:"RX", kind:"rx", x:0.26, y:0.80, locked:false, zone:null});
+    parts.push({id:"vtx_1", label:"VTX", kind:"vtx", x:0.35, y:0.80, locked:false, zone:null});
+    parts.push({id:"ant_1", label:"ANT", kind:"antenna", x:0.44, y:0.80, locked:false, zone:null});
+    parts.push({id:"cam_1", label:"CAM", kind:"camera", x:0.53, y:0.80, locked:false, zone:null});
+
+    return parts;
+  }
+
+  let state = loadState() || defaultState();
+
+  // Apply UI toggles to state (if loaded)
+  function syncTogglesFromState(){
+    document.getElementById("tHints").checked = !!state.show_hints;
+    document.getElementById("tLabels").checked = !!state.show_labels;
+    document.getElementById("tLock").checked = !!state.lock_on;
+    document.getElementById("tSound").checked = !!state.sound_on;
+  }
+
+  // --------------------- UI refs ---------------------
+  const kScore = document.getElementById("kScore");
+  const kTime  = document.getElementById("kTime");
+  const kStreak= document.getElementById("kStreak");
+  const kBest  = document.getElementById("kBest");
+  const kWrong = document.getElementById("kWrong");
+  const kGrade = document.getElementById("kGrade");
+  const msg    = document.getElementById("msg");
+  const hoverLine = document.getElementById("hoverLine");
+
+  const quizOverlay = document.getElementById("quizOverlay");
+  const qTitle = document.getElementById("qTitle");
+  const qSub = document.getElementById("qSub");
+  const qWhat = document.getElementById("qWhat");
+  const qGotchas = document.getElementById("qGotchas");
+  const qQuestion = document.getElementById("qQuestion");
+  const qOptions = document.getElementById("qOptions");
+  const qResult = document.getElementById("qResult");
+  const btnCheck = document.getElementById("btnCheck");
+  const btnClose = document.getElementById("btnClose");
+
+  // --------------------- Metrics + Grade ---------------------
+  function elapsedS() { return Math.floor((nowMs() - state.start_ms) / 1000); }
+
+  function computeGrade() {
+    const t = Math.max(1, elapsedS());
+    const wrong = state.wrong;
+    const totalQuiz = state.build_log.length; // approximates attempts
+    const correctQuiz = state.build_log.filter(e => e.quiz_correct === true).length;
+    const acc = totalQuiz ? (correctQuiz / totalQuiz) : 0;
+    const best = state.best_streak;
+
+    const timeScore = Math.max(0, 35 * (1 - Math.min(1, (t - 120) / 360)));
+    const accScore = 35 * acc;
+    const streakScore = 20 * Math.min(1, best / 10);
+    const penalty = Math.min(20, wrong * 2);
+
+    const score100 = Math.max(0, Math.min(100, timeScore + accScore + streakScore - penalty));
+
+    let grade = "F";
+    if (score100 >= 95) grade = "A+";
+    else if (score100 >= 90) grade = "A";
+    else if (score100 >= 80) grade = "B";
+    else if (score100 >= 70) grade = "C";
+    else if (score100 >= 60) grade = "D";
+    return grade;
+  }
+
+  function updateHUD(){
+    kScore.textContent = String(state.score);
+    kTime.textContent  = String(elapsedS());
+    kStreak.textContent= String(state.quiz_streak);
+    kBest.textContent  = String(state.best_streak);
+    kWrong.textContent = String(state.wrong);
+    kGrade.textContent = computeGrade();
+  }
+
+  // --------------------- Konva Board ---------------------
+  let stage=null, bgLayer=null, zonesLayer=null, partsLayer=null;
+  const zoneNodes = new Map();
+  const partNodes = new Map();
+
+  function getCanvasSize(){
+    const stageDiv = document.getElementById("stage");
+    const w = Math.max(420, stageDiv.clientWidth || 900);
+    const aspect = 1100/680;
+    const h = Math.max(320, Math.floor(w/aspect));
+    return {W:w, H:h};
+  }
+
+  function normToPx(xn, yn, W, H){ return {x:xn*W, y:yn*H}; }
+  function pxToNorm(x, y, W, H){
+    return {x: Math.min(1, Math.max(0, x/W)), y: Math.min(1, Math.max(0, y/H))};
+  }
+
+  function drawBackground(W,H){
+    bgLayer.destroyChildren();
+    bgLayer.add(new Konva.Rect({x:0,y:0,width:W,height:H,fill:"#08110c"}));
+
+    const step = Math.max(55, Math.floor(Math.min(W,H)/10));
+    for (let x=0;x<=W;x+=step) bgLayer.add(new Konva.Line({points:[x,0,x,H], stroke:"#122116", strokeWidth:1, opacity:0.55}));
+    for (let y=0;y<=H;y+=step) bgLayer.add(new Konva.Line({points:[0,y,W,y], stroke:"#122116", strokeWidth:1, opacity:0.55}));
+
+    const cx=W/2, cy=H/2;
+    bgLayer.add(new Konva.Line({points:[cx-55,cy,cx+55,cy], stroke:"#00ff88", strokeWidth:2, opacity:0.9}));
+    bgLayer.add(new Konva.Line({points:[cx,cy-55,cx,cy+55], stroke:"#00ff88", strokeWidth:2, opacity:0.9}));
+    bgLayer.add(new Konva.Circle({x:cx,y:cy,radius:10, stroke:"#00ff88", strokeWidth:2, opacity:0.9}));
+  }
+
+  function drawZones(W,H){
+    zonesLayer.destroyChildren();
+    zoneNodes.clear();
+    const zr = Math.max(20, Math.floor(Math.min(W,H) * ZONE_RADIUS_N));
+
+    zones.forEach(z => {
+      const p = normToPx(z.x,z.y,W,H);
+      const ring = new Konva.Circle({
+        x:p.x, y:p.y, radius:zr,
+        stroke:"#00ff88", strokeWidth:2,
+        opacity: state.show_hints ? 0.9 : 0.0
+      });
+      zonesLayer.add(ring);
+      zoneNodes.set(z.key, ring);
+
+      if (state.show_labels) {
+        zonesLayer.add(new Konva.Text({
+          x: p.x + zr + 6,
+          y: p.y - 7,
+          text: z.name,
+          fontSize: 12,
+          fontFamily: "ui-monospace, Menlo, Consolas, monospace",
+          fill: "#9fdcc0",
+          opacity: 0.95
+        }));
+      }
+    });
+  }
+
+  function pulseZone(zoneKey){
+    const ring = zoneNodes.get(zoneKey);
+    if (!ring) return;
+    const base = ring.radius();
+    ring.opacity(1);
+    ring.strokeWidth(3);
+    ring.to({
+      radius: base*1.35, opacity:0.15, duration:0.35, easing: Konva.Easings.EaseOut,
+      onFinish: () => {
+        ring.radius(base);
+        ring.opacity(state.show_hints ? 0.9 : 0.0);
+        ring.strokeWidth(2);
+        zonesLayer.draw();
+      }
+    });
+  }
+
+  function pulsePart(partId){
+    const g = partNodes.get(partId);
+    if (!g) return;
+    g.to({
+      scaleX:1.06, scaleY:1.06, duration:0.12, easing: Konva.Easings.EaseOut,
+      onFinish: () => g.to({scaleX:1, scaleY:1, duration:0.16, easing: Konva.Easings.EaseOut})
+    });
+  }
+
+  function tweenTo(node, x, y){
+    return new Promise(res => {
+      node.to({x,y,duration:0.18,easing:Konva.Easings.EaseOut,onFinish:res});
+    });
+  }
+
+  async function ensurePartNode(W,H, part){
+    if (partNodes.has(part.id)) return;
+
+    const iconSize = 74;
+    const svg = (SVG[part.kind] ? SVG[part.kind]() : SVG.fc());
+    const img = await svgToImage(svg);
+
+    const g = new Konva.Group({x:0,y:0,draggable:!part.locked});
+
+    // huge hitbox for mobile
+    const hit = new Konva.Rect({x:-10,y:-10,width:iconSize+20,height:iconSize+40,fill:"rgba(0,0,0,0)"});
+
+    const glow = new Konva.Rect({
+      x:-10,y:-10,width:iconSize+20,height:iconSize+20,
+      stroke:"#00ff88", strokeWidth:2, cornerRadius:10,
+      opacity: part.locked ? 0.95 : 0.0,
+      shadowColor:"#00ff88", shadowBlur: part.locked ? 14 : 0,
+      shadowOpacity: part.locked ? 0.6 : 0.0
+    });
+
+    const icon = new Konva.Image({image:img, x:0,y:0,width:iconSize,height:iconSize});
+
+    const label = new Konva.Text({
+      x:0, y: iconSize+4,
+      text: part.label,
+      fontSize: 12,
+      fontFamily: "ui-monospace, Menlo, Consolas, monospace",
+      fill: "#e8fff3"
+    });
+
+    g.add(hit); g.add(glow); g.add(icon); g.add(label);
+    glow.moveToBottom();
+
+    g.on("mouseenter", () => {
+      hoverLine.textContent = `HOVER: ${part.label} // ${part.locked ? "LOCKED" : "MOVE"}`;
+      document.body.style.cursor = part.locked ? "default" : "grab";
+    });
+    g.on("mouseleave", () => {
+      hoverLine.textContent = "HOVER: —";
+      document.body.style.cursor = "default";
+    });
+
+    g.on("dragstart", () => {
+      sfx("drag");
+      g.moveToTop();
+      partsLayer.draw();
+      document.body.style.cursor = "grabbing";
+    });
+
+    g.on("dragend", async () => {
+      document.body.style.cursor = "grab";
+      const pos = pxToNorm(g.x(), g.y(), stage.width(), stage.height());
+      await handleDrop(part.id, pos.x, pos.y);
+    });
+
+    partsLayer.add(g);
+    partNodes.set(part.id, g);
+  }
+
+  function updatePartStyle(g, part){
+    const kids = g.getChildren();
+    const glow = kids.find(k => k.className === "Rect" && k.stroke && k.stroke() === "#00ff88");
+    if (glow){
+      glow.opacity(part.locked ? 0.95 : 0.0);
+      glow.shadowBlur(part.locked ? 14 : 0);
+      glow.shadowOpacity(part.locked ? 0.6 : 0.0);
+    }
+    g.draggable(!part.locked);
+  }
+
+  async function drawParts(W,H){
+    // remove nodes for deleted parts (not expected here)
+    for (const [id,node] of partNodes.entries()){
+      if (!state.parts.find(p => p.id === id)) { node.destroy(); partNodes.delete(id); }
+    }
+
+    for (const part of state.parts){
+      await ensurePartNode(W,H, part);
+      const g = partNodes.get(part.id);
+      if (!g) continue;
+      const p = normToPx(part.x, part.y, W, H);
+      g.x(p.x); g.y(p.y);
+      updatePartStyle(g, part);
+    }
+  }
+
+  function nearestZone(xn, yn){
+    let best=null, bestD=1e9;
+    for (const z of zones){
+      const dx = xn - z.x, dy = yn - z.y;
+      const d = Math.sqrt(dx*dx+dy*dy);
+      if (d < bestD){ bestD=d; best=z; }
+    }
+    if (best && bestD <= ZONE_RADIUS_N) return best;
+    return null;
+  }
+
+  function zoneOccupied(zoneKey){
+    return state.parts.some(p => p.locked && p.zone === zoneKey);
+  }
+
+  // --------------------- Quiz modal ---------------------
+  function openQuiz(entry){
+    state.pending_quiz = entry;
+    saveState();
+    qResult.textContent = "";
+    const bank = QUIZ[entry.kind];
+
+    qTitle.textContent = `Mini Lesson: ${bank.title}`;
+    qSub.textContent = `Locked: ${entry.part_label} → ${entry.zone_name}`;
+    qWhat.textContent = bank.what;
+    qGotchas.innerHTML = `<b>Gotchas:</b><br>• ${bank.gotchas.join("<br>• ")}`;
+
+    const [qq, opts] = entry.question;
+    qQuestion.textContent = qq;
+
+    qOptions.innerHTML = "";
+    opts.forEach((o, idx) => {
+      const id = `opt_${idx}`;
+      const row = document.createElement("label");
+      row.innerHTML = `<input type="radio" name="quizopt" value="${idx}" ${idx===0?"checked":""}/> ${o}`;
+      qOptions.appendChild(row);
+    });
+
+    // disable farming
+    btnCheck.disabled = !!state.quiz_scored[entry.event_id];
+    quizOverlay.style.display = "flex";
+  }
+
+  function closeQuiz(){
+    quizOverlay.style.display = "none";
+    state.pending_quiz = null;
+    saveState();
+  }
+
+  function gradeQuiz(isCorrect){
+    const entry = state.pending_quiz;
+    if (!entry) return;
+
+    if (state.quiz_scored[entry.event_id]) {
+      qResult.textContent = "Already scored for this lock (no farming).";
+      return;
+    }
+    state.quiz_scored[entry.event_id] = true;
+
+    const ptsCorrect = 15, ptsWrong = -5, bonusEvery=3, bonusPts=10;
+
+    if (isCorrect) {
+      state.score += ptsCorrect;
+      state.quiz_streak += 1;
+      state.best_streak = Math.max(state.best_streak, state.quiz_streak);
+
+      // mark build_log entry as correct
+      const log = state.build_log.find(e => e.event_id === entry.event_id);
+      if (log) log.quiz_correct = true;
+
+      if (state.quiz_streak % bonusEvery === 0) {
+        state.score += bonusPts;
+        qResult.textContent = `✅ Correct! +${ptsCorrect}. 🔥 Streak bonus +${bonusPts}!`;
+      } else {
+        qResult.textContent = `✅ Correct! +${ptsCorrect}.`;
+      }
+    } else {
+      state.score += ptsWrong;
+      state.quiz_streak = 0;
+
+      const log = state.build_log.find(e => e.event_id === entry.event_id);
+      if (log) log.quiz_correct = false;
+
+      qResult.textContent = `❌ Not quite. (${ptsWrong})`;
+    }
+
+    btnCheck.disabled = true;
+    msg.textContent = "Quiz scored.";
+    updateHUD();
+    saveState();
+  }
+
+  btnClose.onclick = closeQuiz;
+  btnCheck.onclick = () => {
+    const entry = state.pending_quiz;
+    if (!entry) return;
+
+    const chosen = document.querySelector('input[name="quizopt"]:checked');
+    const idx = chosen ? parseInt(chosen.value, 10) : 0;
+    const correctIdx = entry.question[2];
+    const isCorrect = (idx === correctIdx);
+    gradeQuiz(isCorrect);
+  };
+
+  // --------------------- Drop handling ---------------------
+  async function handleDrop(partId, xn, yn){
+    const part = state.parts.find(p => p.id === partId);
+    if (!part || part.locked) return;
+
+    // update raw pos
+    part.x = xn; part.y = yn;
+
+    const z = nearestZone(xn, yn);
+    if (!z) {
+      msg.textContent = `Moved: ${part.label}`;
+      saveState();
+      return;
+    }
+
+    if (zoneOccupied(z.key)) {
+      state.score += -3;
+      state.wrong += 1;
+      msg.textContent = `❌ Zone occupied: ${z.name} (-3)`;
+      sfx("wrong");
+      updateHUD();
+      saveState();
+      return;
+    }
+
+    // snap
+    part.x = z.x; part.y = z.y;
+
+    // animate snap
+    const g = partNodes.get(part.id);
+    if (g) {
+      const {W,H} = getCanvasSize();
+      const p = normToPx(part.x, part.y, W, H);
+      await tweenTo(g, p.x, p.y);
+      partsLayer.draw();
+    }
+
+    // evaluate correctness
+    const ok = z.allow.includes(part.kind);
+    if (!ok) {
+      state.score += -3;
+      state.wrong += 1;
+      msg.textContent = `❌ Wrong zone: ${part.label} near ${z.name} (-3)`;
+      sfx("wrong");
+      pulseZone(z.key);
+      updateHUD();
+      saveState();
+      return;
+    }
+
+    // correct snap
+    state.score += 10;
+    msg.textContent = `✅ Snapped: ${part.label} → ${z.name} (+10)`;
+    sfx("correct");
+    pulseZone(z.key);
+
+    // lock if enabled
+    if (state.lock_on) {
+      part.locked = true;
+      part.zone = z.key;
+      state.score += 15; // lock bonus
+      sfx("lock");
+      pulsePart(part.id);
+
+      // create lock event + randomized question (stable per lock)
+      const eventId = `${nowMs()}_${part.id}_${z.key}`;
+      const bank = QUIZ[part.kind];
+      const qIdx = nowMs() % bank.questions.length;
+      const question = bank.questions[qIdx];
+
+      const entry = {
+        event_id: eventId,
+        kind: part.kind,
+        part_id: part.id,
+        part_label: part.label,
+        zone_key: z.key,
+        zone_name: z.name,
+        question: question,     // [q, opts, correctIdx]
+        quiz_correct: null
+      };
+
+      state.build_log.push(entry);
+      openQuiz(entry);
+    }
+
+    // update Konva style
+    if (partNodes.get(part.id)) updatePartStyle(partNodes.get(part.id), part);
+
+    updateHUD();
+    saveState();
+
+    // win?
+    if (state.parts.every(p => p.locked)) {
+      msg.textContent = "✅ Perfect build! All parts locked.";
+      sfx("win");
+    }
+  }
+
+  // --------------------- Render loop ---------------------
+  async function render(){
+    const {W,H} = getCanvasSize();
+
+    if (!stage) {
+      stage = new Konva.Stage({ container:"stage", width:W, height:H });
+      bgLayer = new Konva.Layer();
+      zonesLayer = new Konva.Layer();
+      partsLayer = new Konva.Layer();
+      stage.add(bgLayer);
+      stage.add(zonesLayer);
+      stage.add(partsLayer);
+
+      window.addEventListener("resize", () => { render(); });
+    } else {
+      stage.width(W); stage.height(H);
+    }
+
+    drawBackground(W,H);
+    drawZones(W,H);
+    await drawParts(W,H);
+
+    bgLayer.draw();
+    zonesLayer.draw();
+    partsLayer.draw();
+  }
+
+  // --------------------- Controls ---------------------
+  document.getElementById("tHints").onchange = (e) => { state.show_hints = e.target.checked; saveState(); render(); };
+  document.getElementById("tLabels").onchange = (e) => { state.show_labels = e.target.checked; saveState(); render(); };
+  document.getElementById("tLock").onchange = (e) => { state.lock_on = e.target.checked; saveState(); msg.textContent = state.lock_on ? "Lock enabled." : "Lock disabled."; };
+  document.getElementById("tSound").onchange = (e) => { state.sound_on = e.target.checked; saveState(); msg.textContent = state.sound_on ? "Sound enabled." : "Sound disabled."; };
+
+  document.getElementById("btnReset").onclick = () => {
+    state = defaultState();
+    saveState();
+    syncTogglesFromState();
+    msg.textContent = "Reset.";
+    updateHUD();
+    render();
+  };
+
+  // --------------------- Boot ---------------------
+  syncTogglesFromState();
+  updateHUD();
+  render();
+
+  // Tick timer
+  setInterval(() => { updateHUD(); }, 250);
+
+  // Resume quiz if it was open (optional)
+  if (state.pending_quiz) {
+    // find last entry
+    const last = state.build_log.find(e => e.event_id === state.pending_quiz.event_id) || state.pending_quiz;
+    openQuiz(last);
+  }
+
+})();
+</script>
+</body>
+</html>
+""",
+    height=820,
+    scrolling=False,
 )
-
-apply_drag_event(ev)
-
-# Win state
-parts: List[Part] = st.session_state.parts
-if is_win(parts):
-    st.success("✅ Perfect build! All parts locked.")
-    st.balloons()
-    # signal win sfx
-    st.session_state.server_event = {"type": "win"}
-
-# Auto-open quiz dialog
-pending = st.session_state.pending_quiz
-if pending:
-    with st.dialog(f"📘 Mini Lesson Quiz: {pending['lesson']['title']}"):
-        render_quiz(pending)
-        st.divider()
-        if st.button("Close lesson"):
-            st.session_state.pending_quiz = None
-            st.rerun()
-
-# Lesson library
-st.divider()
-st.subheader("📚 Lesson Library (unlocked by locking parts)")
-
-if not st.session_state.build_log:
-    st.info("Lock a correct part to unlock micro-lessons.")
-else:
-    for i, entry in enumerate(reversed(st.session_state.build_log), start=1):
-        title = entry["lesson"]["title"]
-        with st.expander(f"{i}. {title} — {entry['part_label']} @ {entry['zone_name']}"):
-            render_quiz(entry)
